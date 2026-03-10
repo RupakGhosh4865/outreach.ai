@@ -16,13 +16,6 @@ export default function RootLayout({ children }) {
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet" />
       </head>
       <body>
-        <div className="mesh-bg" />
-        <div className="water-flow">
-          <div className="water-layer layer-1"></div>
-          <div className="water-layer layer-2"></div>
-          <div className="water-layer layer-3"></div>
-          <div className="water-current" />
-        </div>
         <Navbar />
         {children}
       </body>

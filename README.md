@@ -13,9 +13,16 @@ A full-stack application with a Next.js client and Node.js/Express server, conta
 - Docker & Docker Compose
 - Node.js (for local development without Docker)
 
-### Running Locally
+### Running Locally (Development)
 ```bash
 docker-compose up
+```
+The client will be available at `http://localhost:3000` and the server at `http://localhost:5000`. Changes to your local files will reflect in the container automatically.
+
+### Running in Production
+To run the production-optimized build of the application (e.g. for deployment or showcasing without dev tools):
+```bash
+docker-compose -f docker-compose.prod.yml up -d --build
 ```
 The client will be available at `http://localhost:3000` and the server at `http://localhost:5000`.
 

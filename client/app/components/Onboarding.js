@@ -24,12 +24,12 @@ export default function Onboarding({ onFinish }) {
 
     return (
         <div className="onboarding-overlay">
-            <div className="onboarding-card card">
-                <div className="stepper" style={{ marginBottom: 40 }}>
+            <div className="onboarding-card">
+                <div className="stepper">
                     {steps.map((s, i) => (
                         <div key={s.id} className="step-item">
                             <div className={`step-circle ${step === s.id ? 'active' : step > s.id ? 'done' : ''}`}>
-                                {step > s.id ? <CheckCircle size={16} /> : s.id}
+                                {step > s.id ? <CheckCircle size={14} /> : <span className="text-[10px] font-bold">{s.id}</span>}
                             </div>
                             <div className={`step-label ${step === s.id ? 'active' : ''}`}>{s.title}</div>
                             {i < steps.length - 1 && <div className={`step-line ${step > s.id ? 'done' : ''}`} />}
@@ -38,70 +38,58 @@ export default function Onboarding({ onFinish }) {
                 </div>
 
                 {step === 1 && (
-                    <div className="onboarding-step reveal animate-fade-in-up">
-                        <h2 className="step-title">Let's get started</h2>
+                    <div className="onboarding-step">
+                        <h2 className="step-title">Let&apos;s get started</h2>
                         <p className="step-desc">First, what should we call you?</p>
                         <div className="form-group">
-                            <label>Full Name</label>
+                            <label className="text-[10px] font-bold uppercase tracking-widest text-[#A8E063] mb-2 block">Full Name</label>
                             <input
                                 type="text"
+                                className="w-full bg-[#060D18] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-[#A8E063] outline-none transition-all"
                                 placeholder="Jane Doe"
                                 value={formData.name}
                                 onChange={e => setFormData({ ...formData, name: e.target.value })}
                                 autoFocus
                             />
                         </div>
-                        <button className="btn btn-primary btn-full btn-lg" onClick={nextStep} disabled={!formData.name}>
+                        <button className="w-full py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2 mt-8 disabled:opacity-50" onClick={nextStep} disabled={!formData.name}>
                             Continue <ArrowRight size={18} />
                         </button>
                     </div>
                 )}
 
                 {step === 2 && (
-                    <div className="onboarding-step reveal animate-fade-in-up">
-                        <h2 className="step-title">What's your focus?</h2>
-                        <p className="step-desc">We'll tailor your outreach based on your role.</p>
+                    <div className="onboarding-step">
+                        <h2 className="step-title">What&apos;s your focus?</h2>
+                        <p className="step-desc">We&apos;ll tailor your outreach based on your role.</p>
 
-                        <div className="radio-group" style={{ marginBottom: 24 }}>
-                            <div className="radio-option">
-                                <input
-                                    type="radio" id="tech" name="role"
-                                    checked={formData.roleType === 'tech'}
-                                    onChange={() => setFormData({ ...formData, roleType: 'tech' })}
-                                />
-                                <label htmlFor="tech">
-                                    <span className="radio-icon">💻</span>
-                                    <span className="radio-label">Tech Guest</span>
-                                    <span className="radio-desc">Engineering, Product, Design</span>
-                                </label>
-                            </div>
-                            <div className="radio-option">
-                                <input
-                                    type="radio" id="nontech" name="role"
-                                    checked={formData.roleType === 'nontech'}
-                                    onChange={() => setFormData({ ...formData, roleType: 'nontech' })}
-                                />
-                                <label htmlFor="nontech">
-                                    <span className="radio-icon">🤝</span>
-                                    <span className="radio-label">Non-Tech</span>
-                                    <span className="radio-desc">Sales, Ops, Marketing</span>
-                                </label>
-                            </div>
+                        <div className="grid grid-cols-2 gap-4 mb-8">
+                            <label className={`cursor-pointer p-4 rounded-xl border transition-all ${formData.roleType === 'tech' ? 'bg-[#A8E063]/10 border-[#A8E063]' : 'bg-[#060D18] border-white/10 opacity-40 hover:opacity-100'}`}>
+                                <input type="radio" className="hidden" name="role" checked={formData.roleType === 'tech'} onChange={() => setFormData({ ...formData, roleType: 'tech' })} />
+                                <div className="text-xl mb-1">💻</div>
+                                <div className="text-sm font-bold text-white">Tech</div>
+                            </label>
+                            <label className={`cursor-pointer p-4 rounded-xl border transition-all ${formData.roleType === 'nontech' ? 'bg-[#A8E063]/10 border-[#A8E063]' : 'bg-[#060D18] border-white/10 opacity-40 hover:opacity-100'}`}>
+                                <input type="radio" className="hidden" name="role" checked={formData.roleType === 'nontech'} onChange={() => setFormData({ ...formData, roleType: 'nontech' })} />
+                                <div className="text-xl mb-1">🤝</div>
+                                <div className="text-sm font-bold text-white">Non-Tech</div>
+                            </label>
                         </div>
 
-                        <div className="form-group">
-                            <label>Target Role</label>
+                        <div className="form-group mb-8">
+                            <label className="text-[10px] font-bold uppercase tracking-widest text-[#A8E063] mb-2 block">Target Role</label>
                             <input
                                 type="text"
+                                className="w-full bg-[#060D18] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-[#A8E063] outline-none transition-all"
                                 placeholder="e.g. Senior Frontend Developer"
                                 value={formData.targetRole}
                                 onChange={e => setFormData({ ...formData, targetRole: e.target.value })}
                             />
                         </div>
 
-                        <div style={{ display: 'flex', gap: 12 }}>
-                            <button className="btn btn-secondary btn-lg" onClick={prevStep}>Back</button>
-                            <button className="btn btn-primary btn-lg btn-full" onClick={nextStep} disabled={!formData.targetRole}>
+                        <div className="flex gap-4">
+                            <button className="flex-1 py-4 border border-white/10 text-white font-bold rounded-lg hover:bg-white/5 transition-all" onClick={prevStep}>Back</button>
+                            <button className="flex-1 py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50" onClick={nextStep} disabled={!formData.targetRole}>
                                 Move On <ArrowRight size={18} />
                             </button>
                         </div>
@@ -109,20 +97,20 @@ export default function Onboarding({ onFinish }) {
                 )}
 
                 {step === 3 && (
-                    <div className="onboarding-step reveal animate-fade-in-up">
+                    <div className="onboarding-step">
                         <h2 className="step-title">Upload your resume</h2>
                         <p className="step-desc">Our AI will parse this to write better emails (Optional).</p>
 
-                        <div className="file-upload" style={{ marginBottom: 24 }}>
-                            <input type="file" onChange={e => setFormData({ ...formData, resume: e.target.files[0] })} />
-                            <div className="upload-icon">📄</div>
-                            <div className="upload-text">{formData.resume ? formData.resume.name : 'Drop your resume here'}</div>
-                            <div className="upload-hint">PDF or Word, max 5MB</div>
+                        <div className="relative border-2 border-dashed border-white/10 rounded-2xl p-10 text-center hover:border-[#A8E063]/40 transition-all cursor-pointer bg-[#060D18]/40 mb-8">
+                            <input type="file" className="absolute inset-0 opacity-0 cursor-pointer" onChange={e => setFormData({ ...formData, resume: e.target.files[0] })} />
+                            <div className="text-3xl mb-4">📄</div>
+                            <div className="text-sm font-bold text-white mb-1">{formData.resume ? formData.resume.name : 'Drop your resume here'}</div>
+                            <div className="text-xs text-white/20 uppercase tracking-widest font-bold">PDF or Word, max 5MB</div>
                         </div>
 
-                        <div style={{ display: 'flex', gap: 12 }}>
-                            <button className="btn btn-secondary btn-lg" onClick={prevStep}>Back</button>
-                            <button className="btn btn-primary btn-lg btn-full" onClick={nextStep}>
+                        <div className="flex gap-4">
+                            <button className="flex-1 py-4 border border-white/10 text-white font-bold rounded-lg hover:bg-white/5 transition-all" onClick={prevStep}>Back</button>
+                            <button className="flex-1 py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2" onClick={nextStep}>
                                 {formData.resume ? 'Resume Attached' : 'Skip for now'} <ArrowRight size={18} />
                             </button>
                         </div>
@@ -130,18 +118,18 @@ export default function Onboarding({ onFinish }) {
                 )}
 
                 {step === 4 && (
-                    <div className="onboarding-step reveal animate-fade-in-up" style={{ textAlign: 'center' }}>
-                        <div className="success-icon" style={{ fontSize: '4rem', marginBottom: 24 }}>✨</div>
-                        <h2 className="step-title">You're all set!</h2>
+                    <div className="onboarding-step text-center">
+                        <div className="w-20 h-20 rounded-full bg-[#A8E063]/10 flex items-center justify-center text-[#A8E063] mx-auto mb-8">
+                            <Sparkles size={40} />
+                        </div>
+                        <h2 className="step-title">You&apos;re all set!</h2>
                         <p className="step-desc" style={{ maxWidth: 'unset' }}>
-                            We've prepared your profile. Now, sign in with Google or LinkedIn to finalize your account and start your outreach.
+                            We&apos;ve prepared your profile. Now, sign in with Google or LinkedIn to finalize your account and start your outreach.
                         </p>
 
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 32 }}>
-                            <button className="btn btn-primary btn-lg" onClick={() => onFinish(formData)}>
-                                Go to Sign In <ArrowRight size={18} />
-                            </button>
-                        </div>
+                        <button className="w-full py-5 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2 text-lg hover:shadow-[0_8px_30px_rgba(168,224,99,0.3)]" onClick={() => onFinish(formData)}>
+                            Go to Sign In <ArrowRight size={20} />
+                        </button>
                     </div>
                 )}
             </div>
@@ -150,8 +138,8 @@ export default function Onboarding({ onFinish }) {
                 .onboarding-overlay {
                     position: fixed;
                     inset: 0;
-                    background: rgba(11, 12, 16, 0.95);
-                    backdrop-filter: blur(10px);
+                    background: rgba(6, 13, 24, 0.98);
+                    backdrop-filter: blur(12px);
                     z-index: 1000;
                     display: flex;
                     align-items: center;
@@ -159,24 +147,71 @@ export default function Onboarding({ onFinish }) {
                     padding: 24px;
                 }
                 .onboarding-card {
-                    max-width: 560px;
+                    max-width: 520px;
                     width: 100%;
                     padding: 48px;
-                    border: 1px solid rgba(185, 255, 44, 0.2);
-                    box-shadow: 0 40px 100px rgba(0, 0, 0, 0.8);
+                    background: #0F2137;
+                    border: 1px solid rgba(255, 255, 255, 0.05);
+                    border-radius: 24px;
+                    box-shadow: 0 40px 100px rgba(0, 0, 0, 0.5);
                 }
-                .step-title {
-                    font-family: var(--font-space-grotesk);
-                    font-size: 2rem;
-                    font-weight: 600;
-                    margin-bottom: 8px;
-                    color: var(--foreground);
+                .stepper {
+                    display: flex;
+                    justify-content: space-between;
+                    margin-bottom: 48px;
                 }
-                .step-desc {
-                    color: var(--muted-foreground);
-                    font-size: 1.125rem;
-                    margin-bottom: 32px;
-                    max-width: 400px;
+                .step-item {
+                    display: flex;
+                    flex-direction: column;
+                    align-items: center;
+                    gap: 8px;
+                    flex: 1;
+                    position: relative;
+                }
+                .step-circle {
+                    width: 24px;
+                    height: 24px;
+                    border-radius: 50%;
+                    background: rgba(255, 255, 255, 0.05);
+                    color: rgba(255, 255, 255, 0.2);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    transition: all 0.3s;
+                    border: 1px solid rgba(255, 255, 255, 0.05);
+                    z-index: 2;
+                }
+                .step-circle.active {
+                    background: #A8E063;
+                    color: #060D18;
+                    box-shadow: 0 0 15px rgba(168, 224, 99, 0.4);
+                }
+                .step-circle.done {
+                    background: #1a2e4d;
+                    color: #A8E063;
+                    border-color: #A8E063/20;
+                }
+                .step-label {
+                    font-size: 10px;
+                    font-weight: 700;
+                    text-transform: uppercase;
+                    letter-spacing: 0.05em;
+                    color: rgba(255, 255, 255, 0.2);
+                }
+                .step-label.active {
+                    color: #A8E063;
+                }
+                .step-line {
+                    position: absolute;
+                    top: 12px;
+                    left: 50%;
+                    width: 100%;
+                    height: 1px;
+                    background: rgba(255, 255, 255, 0.05);
+                    z-index: 1;
+                }
+                .step-line.done {
+                    background: #A8E063/20;
                 }
             `}</style>
         </div>

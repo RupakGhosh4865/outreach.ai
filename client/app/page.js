@@ -1,6 +1,7 @@
 'use client';
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { Zap, Sparkles } from 'lucide-react';
 import LandingPage from './components/LandingPage';
 import Onboarding from './components/Onboarding';
 
@@ -64,77 +65,90 @@ export default function HomePage() {
 
   return (
     <main className="page">
-      <div className="glow-tr"></div>
-      <div className="glow-bl"></div>
+      <div className="section-container">
+        <header className="mb-12">
+          <h1 className="text-3xl font-bold tracking-tight mb-3">
+            Welcome back{profile ? `, ${profile.name.split(' ')[0]}` : ''}
+          </h1>
+          <p className="text-white/40 text-lg">
+            You have {stats.total} outreaches tracked. Ready to find your next role?
+          </p>
+        </header>
 
-      <div className="container">
-        <div className="page-header">
-          <h1>Welcome back{profile ? `, ${profile.name.split(' ')[0]}` : ''}</h1>
-          <p>You have {stats.total} outreaches tracked. Ready to find your next role?</p>
-        </div>
-
-        {/* Profile/Upgrade Quick Actions */}
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, marginBottom: 32 }}>
-          <div className="card">
-            <div className="card-title"><span className="icon">🚀</span> Fast Action</div>
-            <p style={{ color: 'var(--muted-foreground)', marginBottom: 24 }}>Paste a LinkedIn URL and start a new automated outreach campaign.</p>
-            <Link href="/outreach" className="btn btn-primary btn-full">New Outreach</Link>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
+          <div className="bg-[#0F2137] border border-white/5 rounded-2xl p-8 hover:border-[#A8E063]/30 transition-all">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-lg bg-[#A8E063]/10 flex items-center justify-center text-[#A8E063]">
+                <Zap size={20} />
+              </div>
+              <h3 className="text-white font-bold text-lg">Fast Action</h3>
+            </div>
+            <p className="text-white/40 text-sm mb-8 leading-relaxed">
+              Paste a LinkedIn URL and start a new automated outreach campaign.
+            </p>
+            <Link href="/outreach" className="flex items-center justify-center w-full py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all no-underline">
+              New Outreach
+            </Link>
           </div>
-          <div className="card">
-            <div className="card-title"><span className="icon">✨</span> Account</div>
-            <div style={{ marginBottom: 16 }}>
-              <span className={`badge ${profile?.subscription?.plan === 'free' ? 'badge-purple' : 'badge-green'}`}>
+
+          <div className="bg-[#0F2137] border border-white/5 rounded-2xl p-8 hover:border-[#A8E063]/30 transition-all">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="w-10 h-10 rounded-lg bg-[#A8E063]/10 flex items-center justify-center text-[#A8E063]">
+                <Sparkles size={20} />
+              </div>
+              <h3 className="text-white font-bold text-lg">Account</h3>
+            </div>
+            <div className="mb-8">
+              <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${profile?.subscription?.plan === 'free' ? 'bg-[#A8E063]/10 text-[#A8E063] border border-[#A8E063]/20' : 'bg-[#7EC63A] text-black'}`}>
                 {profile?.subscription?.plan || 'Free'} Plan
               </span>
             </div>
-            <Link href="/profile" className="btn btn-secondary btn-full">Manage Profile</Link>
+            <Link href="/profile" className="flex items-center justify-center w-full py-4 border border-white/10 hover:border-white/20 text-white font-bold rounded-lg transition-all no-underline">
+              Manage Profile
+            </Link>
           </div>
         </div>
 
-        {/* Stats Section */}
-        <div className="stats-row">
-          <div className="stat-card">
-            <div className="stat-value">{stats.total}</div>
-            <div className="stat-label">Total Outreaches</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats.sent}</div>
-            <div className="stat-label">Emails Sent</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-value">{stats.companies}</div>
-            <div className="stat-label">Companies</div>
-          </div>
-        </div>
-
-        {/* Recent History */}
-        {history.length > 0 && (
-          <div className="card">
-            <div className="card-title" style={{ justifyContent: 'space-between' }}>
-              <span>Recent Outreach</span>
-              <Link href="/history" className="btn btn-secondary btn-sm">View All</Link>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
+          {[
+            { label: 'Total Outreaches', value: stats.total },
+            { label: 'Emails Sent', value: stats.sent },
+            { label: 'Companies', value: stats.companies },
+          ].map((stat, i) => (
+            <div key={i} className="bg-[#0F2137] border border-white/5 rounded-2xl p-8 text-center md:text-left">
+              <div className="text-white/30 text-xs font-bold uppercase tracking-widest mb-2">{stat.label}</div>
+              <div className="text-[#A8E063] text-4xl font-extrabold tracking-tight">{stat.value}</div>
             </div>
-            <div className="table-wrap">
-              <table>
+          ))}
+        </div>
+
+        {history.length > 0 && (
+          <div className="bg-[#0F2137] border border-white/5 rounded-2xl overflow-hidden">
+            <div className="px-8 py-6 border-b border-white/[0.06] flex justify-between items-center">
+              <h3 className="text-white font-bold">Recent Outreach</h3>
+              <Link href="/history" className="text-[#A8E063] text-xs font-bold uppercase tracking-widest hover:translate-x-1 transition-transform inline-block no-underline">View All →</Link>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-left">
                 <thead>
-                  <tr>
-                    <th>Company</th>
-                    <th>Role</th>
-                    <th>Status</th>
-                    <th>Date</th>
+                  <tr className="bg-white/[0.02]">
+                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Company</th>
+                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Role</th>
+                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Status</th>
+                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Date</th>
                   </tr>
                 </thead>
-                <tbody>
+                <tbody className="divide-y divide-white/[0.04]">
                   {history.slice(0, 5).map(j => (
-                    <tr key={j._id}>
-                      <td style={{ fontWeight: 600 }}>{j.companyName}</td>
-                      <td>{j.jobTitle}</td>
-                      <td>
-                        <span className={`badge ${j.status === 'sent' ? 'badge-green' : 'badge-red'}`}>
+                    <tr key={j._id} className="hover:bg-white/[0.02] transition-colors">
+                      <td className="px-8 py-5 text-sm font-bold text-white">{j.companyName}</td>
+                      <td className="px-8 py-5 text-sm text-white/50">{j.jobTitle}</td>
+                      <td className="px-8 py-5">
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-tighter ${j.status === 'sent' ? 'bg-[#A8E063]/10 text-[#A8E063]' : 'bg-red-500/10 text-red-500'}`}>
                           {j.status}
                         </span>
                       </td>
-                      <td style={{ color: 'var(--muted-foreground)' }}>{new Date(j.createdAt).toLocaleDateString()}</td>
+                      <td className="px-8 py-5 text-sm text-white/30 font-mono italic">{new Date(j.createdAt).toLocaleDateString()}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -143,6 +157,9 @@ export default function HomePage() {
           </div>
         )}
       </div>
+      <style jsx>{`
+                .no-underline { text-decoration: none; }
+            `}</style>
     </main>
   );
 }

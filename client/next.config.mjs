@@ -1,10 +1,10 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  // 👇 Add this "webpack" block
+  outputFileTracingRoot: process.cwd(), // Fix "wrong root" warning
   webpack: (config) => {
     config.watchOptions = {
-      poll: 1000, // Check for changes every 1 second
-      aggregateTimeout: 300, // Delay before rebuilding
+      poll: 1000,
+      aggregateTimeout: 300,
     };
     return config;
   },
