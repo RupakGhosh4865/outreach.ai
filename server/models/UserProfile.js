@@ -10,9 +10,16 @@ const userProfileSchema = new mongoose.Schema({
   portfolioUrl: { type: String, default: null },
   techStack: { type: String, default: null },
   experienceYears: { type: Number, default: 0 },
+  experienceMonths: { type: Number, default: 0 },
   targetRoles: { type: String, default: null },
   resumePath: { type: String, default: null },
   resumeOriginalName: { type: String, default: null },
+  resumeLink: { type: String, default: null },
+  // AI Resume Optimizer — two role-specific resumes
+  resumeGenaiPath: { type: String, default: null },
+  resumeGenaiName: { type: String, default: null },
+  resumeBackendPath: { type: String, default: null },
+  resumeBackendName: { type: String, default: null },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
   subscription: {

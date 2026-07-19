@@ -1,0 +1,42 @@
+{
+    "manifest_version": 3,
+    "name": "Outreach.ai \u2014 Job Outreach Automator",
+    "version": "1.0.0",
+    "description": "1-click outreach from any LinkedIn job post",
+    "content_security_policy": {
+        "extension_pages": "script-src 'self'; object-src 'self'"
+    },
+    "icons": {
+        "16": "icons/icon16.png",
+        "48": "icons/icon48.png",
+        "128": "icons/icon128.png"
+    },
+    "permissions": [
+        "activeTab",
+        "storage",
+        "identity",
+        "scripting"
+    ],
+    "host_permissions": [
+        "https://www.linkedin.com/*",
+        "http://localhost:3000/*"
+    ],
+    "background": {
+        "service_worker": "background.js"
+    },
+    "content_scripts": [
+        {
+            "matches": [
+                "https://www.linkedin.com/*"
+            ],
+            "js": [
+                "content.js"
+            ],
+            "run_at": "document_idle"
+        }
+    ],
+    "action": {
+        "default_icon": "icons/icon48.png",
+        "default_title": "Toggle Outreach.ai"
+    }
+}

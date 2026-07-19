@@ -1,8 +1,10 @@
 'use client';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import AuthGuard from '../components/AuthGuard';
+import ResumeOptimizerPanel from '../components/ResumeOptimizerPanel';
+import UkJobFinder from '../components/UkJobFinder';
 
 const API = 'http://localhost:5000';
 
@@ -41,6 +43,7 @@ export default function OutreachPage() {
     const [userEmail, setUserEmail] = useState('');
     const [toasts, setToasts] = useState([]);
     const [loading, setLoading] = useState(false);
+    const [isExtension, setIsExtension] = useState(false);
 
     // Step 1 state
     const [emailType, setEmailType] = useState('referral');
@@ -77,10 +80,27 @@ export default function OutreachPage() {
 
     // Autopilot state
     const [autopilot, setAutopilot] = useState(false);
-    const [autoStep, setAutoStep] = useState(0); // 0-7
+    const [autoStep, setAutoStep] = useState(0); // 0-8
     const [previousAutoStep, setPreviousAutoStep] = useState(0);
     const [autoResults, setAutoResults] = useState([]);
     const [limitReached, setLimitReached] = useState(false);
+    const [autoMode, setAutoMode] = useState('');
+    const [pastedJobDescription, setPastedJobDescription] = useState('');
+
+    // Resume Optimizer state
+    const [optimizedResumeInfo, setOptimizedResumeInfo] = useState(null); // { selectedResume, matchScore }
+    const [resumeOptimizing, setResumeOptimizing] = useState(false);
+    const [optimizeState, setOptimizeState] = useState(null); // { key, status: 'pending'|'done'|'failed', result }
+    const optimizePollRef = useRef(null);
+    const optimizeJdRef = useRef(''); // last JD we kicked off, to avoid duplicate triggers
+
+    // Job Analysis state
+    const [analyzingFit, setAnalyzingFit] = useState(false);
+    const [fitResults, setFitResults] = useState(null);
+
+    // Apply Timing state
+    const [applyTiming, setApplyTiming] = useState('now'); // 'now' | 'schedule'
+    const [scheduledAt, setScheduledAt] = useState('');
 
     const addToast = (message, type = 'info') => {
         const id = Date.now();
@@ -91,11 +111,41 @@ export default function OutreachPage() {
     useEffect(() => {
         const saved = localStorage.getItem('jobreach_email');
         if (saved) setUserEmail(saved);
+
+        // Detect if loaded from Chrome Extension
+        const params = new URLSearchParams(window.location.search);
+        if (params.get('source') === 'chrome-extension') {
+            setIsExtension(true);
+        }
     }, []);
 
     useEffect(() => {
         setPreviousAutoStep(autoStep);
     }, [autoStep]);
+
+    // Listen for messages from Chrome Extension
+    useEffect(() => {
+        const handleMessage = (event) => {
+            // Check origin for security
+            if (event.origin !== window.location.origin && !event.origin.includes('chrome-extension://')) {
+                // In development, the extension origin might be different or null
+            }
+
+            if (event.data?.type === 'EXTENSION_JOB_URL') {
+                const { url, title, company } = event.data;
+                console.log('[Extension] Received job data:', { url, title, company });
+                
+                if (url) setLinkedinUrl(url);
+                if (title) setJobTitle(title);
+                if (company) setCompanyName(company);
+                
+                addToast('⚡ Job details imported from Extension!', 'success');
+            }
+        };
+
+        window.addEventListener('message', handleMessage);
+        return () => window.removeEventListener('message', handleMessage);
+    }, []);
 
     const direction = autoStep > previousAutoStep ? 1 : -1;
 
@@ -141,7 +191,10 @@ export default function OutreachPage() {
             if (res.ok) {
                 if (data.companyName) setCompanyName(data.companyName);
                 if (data.jobTitle) setJobTitle(data.jobTitle);
-                if (data.jobDescription) setJobDescription(data.jobDescription);
+                if (data.jobDescription) {
+                    setJobDescription(data.jobDescription);
+                    analyzeJobFit(data.jobDescription); // Trigger analysis automatically
+                }
                 if (data.postEmails?.length) {
                     setPostEmails(data.postEmails);
                     addToast(`✨ Job details extracted! Found ${data.postEmails.length} email(s) in post.`, 'success');
@@ -156,6 +209,81 @@ export default function OutreachPage() {
             addToast('Connection error during extraction.', 'error');
         }
         setScraping(false);
+    }
+
+    // ── Background resume optimization (dynamic CV per JD) ──────────────────
+    async function startResumeOptimization(jd) {
+        if (!jd?.trim() || jd.trim() === optimizeJdRef.current) return;
+        optimizeJdRef.current = jd.trim();
+        if (optimizePollRef.current) clearInterval(optimizePollRef.current);
+
+        try {
+            const token = localStorage.getItem('authToken');
+            const res = await fetch(`${API}/api/jobs/optimize-resume`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+                body: JSON.stringify({ jobDescription: jd }),
+            });
+            const data = await res.json();
+            if (!res.ok) { setOptimizeState({ status: 'failed' }); return; }
+            if (data.status === 'done') {
+                setOptimizeState({ key: data.key, status: 'done', result: data.result });
+                return;
+            }
+            setOptimizeState({ key: data.key, status: 'pending' });
+
+            let polls = 0;
+            optimizePollRef.current = setInterval(async () => {
+                polls += 1;
+                try {
+                    const sr = await fetch(`${API}/api/jobs/optimize-resume/status?key=${data.key}`);
+                    const sd = await sr.json();
+                    if (sd.status === 'done') {
+                        clearInterval(optimizePollRef.current);
+                        setOptimizeState({ key: data.key, status: 'done', result: sd.result });
+                        addToast('✨ Dynamic CV ready for this job!', 'success');
+                    } else if (sd.status === 'failed' || polls > 24) {
+                        clearInterval(optimizePollRef.current);
+                        setOptimizeState({ key: data.key, status: 'failed' });
+                    }
+                } catch { /* keep polling until cap */ }
+            }, 5000);
+        } catch {
+            setOptimizeState({ status: 'failed' });
+        }
+    }
+
+    // Cleanup polling on unmount
+    useEffect(() => () => {
+        if (optimizePollRef.current) clearInterval(optimizePollRef.current);
+    }, []);
+
+    // Auto-optimize when a substantial JD is pasted manually
+    useEffect(() => {
+        if (jobDescription.trim().length > 200) {
+            const timer = setTimeout(() => startResumeOptimization(jobDescription), 1500);
+            return () => clearTimeout(timer);
+        }
+    }, [jobDescription]);
+
+    async function analyzeJobFit(textToAnalyze) {
+        if (!textToAnalyze) return;
+        setAnalyzingFit(true);
+        try {
+            const res = await fetch(`${API}/api/jobs/analyze-fit`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ jobDescription: textToAnalyze, userEmail }),
+            });
+            const data = await res.json();
+            if (res.ok && data.scores) {
+                setFitResults(data);
+                addToast('ATS Scan complete!', 'success');
+            }
+        } catch (e) {
+            console.error('Analysis error:', e);
+        }
+        setAnalyzingFit(false);
     }
 
     async function handleProfileScrape() {
@@ -308,6 +436,7 @@ export default function OutreachPage() {
     // ── Step 3: Send ─────────────────────────────────────────────────────────
     async function handleSend() {
         if (!emailSubject || !emailBody) { addToast('Email subject and body required.', 'error'); return; }
+        if (applyTiming === 'schedule' && !scheduledAt) { addToast('Please pick a date/time to schedule the send.', 'error'); return; }
 
         const recipients = [
             ...employees.filter(e => selectedEmps.includes(e.email)).map(e => ({
@@ -321,6 +450,7 @@ export default function OutreachPage() {
         if (!recipients.length) { addToast('No recipients selected.', 'error'); return; }
 
         setSending(true);
+        setResumeOptimizing(true);
         try {
             const token = localStorage.getItem('authToken');
             const res = await fetch(`${API}/api/jobs/send`, {
@@ -332,28 +462,43 @@ export default function OutreachPage() {
                 body: JSON.stringify({
                     userEmail, recipients, subject: emailSubject, body: emailBody,
                     linkedinUrl, companyName, jobTitle, jobDescription, emailType, extraContext,
-                    manualEmail, manualPhone, employees, followUpDays
+                    manualEmail, manualPhone, employees, followUpDays,
+                    scheduledAt: applyTiming === 'schedule' ? scheduledAt : null,
                 }),
             });
             const data = await res.json();
+            setResumeOptimizing(false);
             if (res.ok) {
-                addToast(`🎉 ${data.message}`, 'success');
-                setTimeout(() => router.push('/history'), 2000);
+                if (data.optimizedResumeUsed) {
+                    setOptimizedResumeInfo({ selectedResume: data.optimizedResumeUsed, matchScore: data.optimizedMatchScore });
+                }
+                if (data.scheduled) {
+                    addToast(`📅 ${data.message}`, 'success');
+                    setTimeout(() => router.push('/history'), 2500);
+                } else {
+                    addToast(`🎉 ${data.message}`, 'success');
+                    setTimeout(() => router.push('/history'), 2000);
+                }
             } else {
                 addToast(data.message || 'Failed to send emails.', 'error');
             }
         } catch {
+            setResumeOptimizing(false);
             addToast('Send failed. Check server & Gmail credentials in .env', 'error');
         }
         setSending(false);
     }
 
     // ── Autopilot Orchestrator ──────────────────────────────────────────────
-    async function runAutopilot() {
-        if (!linkedinUrl.trim()) { addToast('Please paste a LinkedIn job URL first.', 'error'); return; }
+    async function runAutopilot(mode = 'url', jobTextOverride = null) {
+        const isUrl = mode === 'url';
+        const effectiveJobText = jobTextOverride || pastedJobDescription;
+        if (isUrl && !linkedinUrl.trim()) { addToast('Please paste a LinkedIn job URL first.', 'error'); return; }
+        if (!isUrl && !effectiveJobText.trim()) { addToast('Please paste the job description text first.', 'error'); return; }
         if (!userEmail) { addToast('Please set up your profile first.', 'error'); return; }
 
         setAutopilot(true);
+        setAutoMode(mode);
         setAutoStep(1);
         setLimitReached(false);
 
@@ -361,17 +506,25 @@ export default function OutreachPage() {
             // Simulated progress for better UX
             const delay = (ms) => new Promise(res => setTimeout(res, ms));
 
-            setAutoStep(1); await delay(800); // Analyzing URL
+            setAutoStep(1); await delay(800); // Analyzing Input
             setAutoStep(2); await delay(1000); // Extracting Job
 
             const token = localStorage.getItem('authToken');
+            const payload = { 
+                url: isUrl ? linkedinUrl : undefined, 
+                jobText: !isUrl ? effectiveJobText : undefined,
+                userEmail, 
+                emailType, 
+                extraContext 
+            };
+
             const res = await fetch(`${API}/api/jobs/autopilot`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${token}`
                 },
-                body: JSON.stringify({ url: linkedinUrl, userEmail, emailType, extraContext }),
+                body: JSON.stringify(payload),
             });
 
             if (res.status === 403) {
@@ -386,9 +539,15 @@ export default function OutreachPage() {
 
             setAutoStep(3); await delay(800); // Finding domain
             setAutoStep(4); await delay(1200); // Discovering employees
-            setAutoStep(5); await delay(1000); // Parsing resume
+            setAutoStep(5); await delay(1000); // Optimizing resume
             setAutoStep(6); await delay(1500); // Generating emails
-            setAutoStep(7); await delay(500); // Ready!
+            setAutoStep(7); await delay(600);  // Finalizing
+            setAutoStep(8); await delay(400);  // Ready!
+
+            // Capture optimized resume info if returned
+            if (data.optimizedResumeUsed) {
+                setOptimizedResumeInfo({ selectedResume: data.optimizedResumeUsed, matchScore: data.optimizedMatchScore });
+            }
 
             // Sync states from autopilot results to the manual wizard state so user can edit
             setCompanyName(data.job.companyName);
@@ -425,12 +584,14 @@ export default function OutreachPage() {
 
     return (
         <AuthGuard>
-            <main className="page">
-                <div className="container" style={{ maxWidth: 780 }}>
-                    <div className="page-header">
-                        <h1>New Job Outreach</h1>
-                        <p>3 steps to send personalized emails automatically</p>
-                    </div>
+            <main className="page" style={isExtension ? { paddingTop: 20 } : {}}>
+                <div className="container" style={isExtension ? { maxWidth: '100%', padding: '0 12px' } : { maxWidth: 780 }}>
+                    {!isExtension && (
+                        <div className="page-header">
+                            <h1>New Job Outreach</h1>
+                            <p>3 steps to send personalized emails automatically</p>
+                        </div>
+                    )}
 
                     {
                         !userEmail && (
@@ -484,7 +645,7 @@ export default function OutreachPage() {
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>Recommended for speed</div>
                                     </div>
 
-                                    <div style={{ display: 'flex', gap: 12 }}>
+                                    <div style={{ display: 'flex', gap: 12, flexDirection: isExtension ? 'column' : 'row', marginBottom: 16 }}>
                                         <input
                                             type="url"
                                             placeholder="Paste LinkedIn job URL..."
@@ -494,12 +655,33 @@ export default function OutreachPage() {
                                         />
                                         <button
                                             type="button"
-                                            onClick={runAutopilot}
+                                            onClick={() => runAutopilot('url')}
                                             disabled={autopilot || !linkedinUrl.trim()}
                                             className="btn btn-primary"
-                                            style={{ borderRadius: 12, padding: '0 28px', minWidth: '180px', fontSize: '1rem', height: '54px' }}
+                                            style={{ borderRadius: 12, padding: '0 28px', minWidth: isExtension ? '100%' : '180px', fontSize: '1rem', height: '54px' }}
                                         >
-                                            {autopilot ? <div className="spinner" /> : '🚀 Start Autopilot'}
+                                            {autopilot && autoMode === 'url' ? <div className="spinner" /> : '🚀 Start via URL'}
+                                        </button>
+                                    </div>
+
+                                    <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: 16, fontWeight: 700 }}>OR</div>
+
+                                    {/* Paragraph approach */}
+                                    <div style={{ display: 'flex', gap: 12, flexDirection: isExtension ? 'column' : 'row' }}>
+                                        <textarea
+                                            placeholder="Paste full job description paragraph (include company and title if possible)..."
+                                            value={pastedJobDescription}
+                                            onChange={e => setPastedJobDescription(e.target.value)}
+                                            style={{ flex: 1, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'white', borderRadius: 12, padding: '14px 18px', fontSize: '1rem', minHeight: '80px', resize: 'vertical' }}
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => runAutopilot('text')}
+                                            disabled={autopilot || !pastedJobDescription.trim()}
+                                            className="btn btn-primary"
+                                            style={{ borderRadius: 12, padding: '0 28px', minWidth: isExtension ? '100%' : '180px', fontSize: '1rem', height: '80px' }}
+                                        >
+                                            {autopilot && autoMode === 'text' ? <div className="spinner" /> : '🚀 Start via Text'}
                                         </button>
                                     </div>
 
@@ -509,7 +691,7 @@ export default function OutreachPage() {
                                                 <div style={{ textAlign: 'center' }}>
                                                     <div style={{ fontSize: '11px', fontWeight: 800, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.2rem', marginBottom: 8 }}>AI Orchestrator v1.1</div>
                                                     <h2 style={{ fontSize: '32px', color: 'white', fontFamily: 'var(--font-serif)' }}>
-                                                        {autoStep === 7 ? 'Successfully Orchestrated' : 'Current Processing State'}
+                                                        {autoStep === 8 ? 'Successfully Orchestrated' : 'Current Processing State'}
                                                     </h2>
                                                 </div>
                                             </div>
@@ -526,9 +708,10 @@ export default function OutreachPage() {
                                                         { icon: '🧠', title: 'Learning', sub: 'Analyzing Profile...', desc: 'Understanding technical stack and matching qualifications...' },
                                                         { icon: '🌐', title: 'Sourcing', sub: 'Finding the Right People', desc: 'Verifying company domains and corporate structure...' },
                                                         { icon: '👥', title: 'Targeting', sub: 'Targeting Decision Makers', desc: 'Identifying decision makers and hiring managers...' },
-                                                        { icon: '📄', title: 'Resume', sub: 'Data mapping', desc: 'Aligning your resume achievements with job needs...' },
+                                                        { icon: '📎', title: 'Resume', sub: '✨ Optimizing Resume...', desc: 'AI is scoring & rewriting your resume against this exact JD...' },
                                                         { icon: '✍️', title: 'Writing', sub: 'Crafting Your Emails', desc: 'Generating high-impact personalized outreach copy...' },
-                                                        { icon: '🚀', title: 'Sending', sub: 'Final Step', desc: 'Preparing everything for your final approval...' }
+                                                        { icon: '📊', title: 'Finalizing', sub: 'Selecting Best Resume', desc: 'Picking the highest ATS-match resume for this role...' },
+                                                        { icon: '🚀', title: 'Ready', sub: 'All Set!', desc: 'Preparing everything for your final approval...' },
                                                     ].map((s, i) => {
                                                         const active = autoStep === i + 1;
                                                         const done = autoStep > i + 1;
@@ -555,7 +738,7 @@ export default function OutreachPage() {
                                                                     position: 'relative'
                                                                 }}>
                                                                     <div className="step-header">
-                                                                        <span style={{ fontSize: '11px', fontWeight: 800, color: active ? '#6366f1' : '#94a3b8', textTransform: 'uppercase', letterSpacing: '2px', display: 'block', marginBottom: 16 }}>Step {i + 1} of 7</span>
+                                                                        <span style={{ fontSize: '11px', fontWeight: 800, color: active ? '#6366f1' : '#94a3b8', textTransform: 'uppercase', letterSpacing: '2px', display: 'block', marginBottom: 16 }}>Step {i + 1} of 8</span>
                                                                         <h2 style={{ fontSize: '30px', color: 'white', marginBottom: 12, fontFamily: 'var(--font-serif)' }}>{s.sub}</h2>
                                                                         <p style={{ fontSize: '15px', color: '#94a3b8', lineHeight: 1.6, marginBottom: 32 }}>{s.desc}</p>
                                                                     </div>
@@ -568,7 +751,7 @@ export default function OutreachPage() {
                                             </div>
 
                                             <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 40 }}>
-                                                {[...Array(7)].map((_, i) => (
+                                                {[...Array(8)].map((_, i) => (
                                                     <div key={i} style={{
                                                         width: autoStep === i + 1 ? 24 : 8,
                                                         height: 8,
@@ -608,7 +791,7 @@ export default function OutreachPage() {
                                         </label>
                                         <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>Get email & mobile from profile</div>
                                     </div>
-                                    <div style={{ display: 'flex', gap: 12 }}>
+                                    <div style={{ display: 'flex', gap: 12, flexDirection: isExtension ? 'column' : 'row' }}>
                                         <input
                                             type="url"
                                             placeholder="Paste LinkedIn Profile URL..."
@@ -621,7 +804,7 @@ export default function OutreachPage() {
                                             onClick={handleProfileScrape}
                                             disabled={profileScraping || !profileUrl.trim()}
                                             className="btn btn-secondary"
-                                            style={{ borderRadius: 12, padding: '0 24px', whiteSpace: 'nowrap' }}
+                                            style={{ borderRadius: 12, padding: '0 24px', whiteSpace: 'nowrap', width: isExtension ? '100%' : 'auto' }}
                                         >
                                             {profileScraping ? <div className="spinner" /> : 'Find Contact'}
                                         </button>
@@ -692,7 +875,25 @@ export default function OutreachPage() {
                                 </div>
 
                                 <div className="form-group">
-                                    <label>Job Description / Requirements</label>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 4 }}>
+                                        <label style={{ marginBottom: 0 }}>Job Description / Requirements</label>
+                                        <div style={{ display: 'flex', gap: 8 }}>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={() => analyzeJobFit(jobDescription)}
+                                                disabled={analyzingFit || !jobDescription.trim()}
+                                            >
+                                                {analyzingFit ? <><span className="spinner"/> Analyzing...</> : '📊 Analyze Job Fit'}
+                                            </button>
+                                            <button
+                                                className="btn btn-secondary btn-sm"
+                                                onClick={() => startResumeOptimization(jobDescription)}
+                                                disabled={optimizeState?.status === 'pending' || !jobDescription.trim()}
+                                            >
+                                                {optimizeState?.status === 'pending' ? <><span className="spinner"/> Optimizing...</> : '✨ Optimize Resume'}
+                                            </button>
+                                        </div>
+                                    </div>
                                     <textarea
                                         placeholder="Paste the job description here (optional but improves email quality)..."
                                         value={jobDescription}
@@ -700,6 +901,56 @@ export default function OutreachPage() {
                                         style={{ minHeight: 120 }}
                                     />
                                 </div>
+
+                                {fitResults && (
+                                    <div style={{ marginBottom: 20, padding: 16, background: 'rgba(99,102,241,0.05)', borderRadius: 12, border: '1px solid rgba(99,102,241,0.2)' }}>
+                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+                                            <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                                🧬 ATS Scan Results
+                                            </div>
+                                            <div className="badge badge-green">Recommended: {
+                                                fitResults.recommendedResume === 'genai' ? '🤖 Gen AI' : 
+                                                fitResults.recommendedResume === 'backend' ? '⚙️ Backend' : '📄 Main'
+                                            }</div>
+                                        </div>
+                                        
+                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
+                                            {['main', 'genai', 'backend'].map(type => (
+                                                <div key={type} style={{ padding: 12, background: 'var(--bg-panel)', borderRadius: 8, border: '1px solid var(--border)' }}>
+                                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 4, textTransform: 'uppercase' }}>
+                                                        {type === 'genai' ? '🤖 Gen AI' : type === 'backend' ? '⚙️ Backend' : '📄 Main'}
+                                                    </div>
+                                                    <div style={{ fontSize: '1.2rem', fontWeight: 700, color: fitResults.scores?.[type] > 75 ? '#10b981' : fitResults.scores?.[type] > 50 ? '#f59e0b' : '#ef4444' }}>
+                                                        {fitResults.scores?.[type] || 0}%
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+
+                                        {fitResults.advice?.length > 0 && (
+                                            <div>
+                                                <div style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)' }}>💡 Skills & Improvement Advice:</div>
+                                                <ul style={{ margin: 0, paddingLeft: 20, fontSize: '0.85rem', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                                                    {fitResults.advice.map((adv, i) => <li key={i}>{adv}</li>)}
+                                                </ul>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+
+                                <ResumeOptimizerPanel apiBase={API} optimizeState={optimizeState} compact={isExtension} />
+
+                                <UkJobFinder
+                                    apiBase={API}
+                                    isExtension={isExtension}
+                                    autopilotBusy={autopilot}
+                                    onRunAutopilot={(job) => {
+                                        const jobText = `${job.title} at ${job.company}${job.location ? ` (${job.location})` : ''}\n\n${job.description || ''}`;
+                                        setPastedJobDescription(jobText);
+                                        if (job.description) startResumeOptimization(job.description);
+                                        runAutopilot('text', jobText);
+                                    }}
+                                />
 
                                 <div className="form-group">
                                     <label>Extra Context (optional)</label>
@@ -972,7 +1223,33 @@ export default function OutreachPage() {
                                             </div>
                                         </div>
 
-                                        <div className="form-group" style={{ background: 'rgba(108, 99, 255, 0.04)', padding: '20px', borderRadius: '16px', border: '1px solid var(--border)', marginBottom: 24 }}>
+                                        <div className="form-group" style={{ background: 'rgba(108, 99, 255, 0.04)', padding: '20px', borderRadius: '16px', border: '1px solid var(--border)', marginBottom: 16 }}>
+
+                                            {/* ── Resume Optimization Panel ── */}
+                                            <ResumeOptimizerPanel apiBase={API} optimizeState={optimizeState} compact={isExtension} />
+
+                                            {!optimizeState && resumeOptimizing && (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(99,102,241,0.08)', borderRadius: 12, border: '1px solid rgba(99,102,241,0.2)', marginBottom: 16 }}>
+                                                    <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2, flexShrink: 0 }} />
+                                                    <span style={{ fontSize: '0.85rem', color: '#a5b4fc', fontWeight: 600 }}>✨ Optimizing your resume against this job description…</span>
+                                                </div>
+                                            )}
+                                            {!optimizeState && !resumeOptimizing && optimizedResumeInfo && (
+                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(16,185,129,0.06)', borderRadius: 12, border: '1px solid rgba(16,185,129,0.2)', marginBottom: 16 }}>
+                                                    <span style={{ fontSize: '1.1rem' }}>✅</span>
+                                                    <div>
+                                                        <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#10b981' }}>RESUME SELECTED: </span>
+                                                        <span style={{ fontSize: '0.85rem', color: 'white', fontWeight: 700 }}>
+                                                            {optimizedResumeInfo.selectedResume === 'genai' ? 'Gen AI Resume' : 'Backend Resume'}
+                                                        </span>
+                                                        <span style={{ fontSize: '0.8rem', color: '#6ee7b7', marginLeft: 8 }}>
+                                                            {optimizedResumeInfo.matchScore}% ATS Match
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            )}
+
+                                            {/* ── Follow-up Reminder ── */}
                                             <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--accent)', fontWeight: 700, fontSize: '0.85rem' }}>
                                                 ⏰ SCHEDULE FOLLOW-UP REMINDER
                                             </label>
@@ -1010,6 +1287,73 @@ export default function OutreachPage() {
                                             </div>
                                         </div>
 
+                                        {/* ── Apply Timing ── */}
+                                        <div className="form-group" style={{ background: 'rgba(16, 185, 129, 0.04)', padding: '20px', borderRadius: '16px', border: '1px solid rgba(16,185,129,0.15)', marginBottom: 24 }}>
+                                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#10b981', fontWeight: 700, fontSize: '0.85rem', marginBottom: 12 }}>
+                                                📅 APPLY TIMING
+                                            </label>
+                                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 16 }}>
+                                                Choose when your application email gets sent.
+                                            </p>
+                                            <div style={{ display: 'flex', gap: 10, marginBottom: applyTiming === 'schedule' ? 16 : 0 }}>
+                                                {[
+                                                    { id: 'now', label: '⚡ Send Now', desc: 'Dispatch immediately' },
+                                                    { id: 'schedule', label: '🗓 Schedule', desc: 'Pick a date & time' },
+                                                ].map(opt => (
+                                                    <button
+                                                        key={opt.id}
+                                                        type="button"
+                                                        id={`apply-timing-${opt.id}`}
+                                                        onClick={() => setApplyTiming(opt.id)}
+                                                        style={{
+                                                            flex: 1,
+                                                            padding: '12px 8px',
+                                                            borderRadius: '12px',
+                                                            fontSize: '0.88rem',
+                                                            fontWeight: 600,
+                                                            border: '1px solid',
+                                                            borderColor: applyTiming === opt.id ? '#10b981' : 'var(--border)',
+                                                            background: applyTiming === opt.id ? 'rgba(16,185,129,0.1)' : 'var(--bg-secondary)',
+                                                            color: applyTiming === opt.id ? '#10b981' : 'var(--text-secondary)',
+                                                            transition: 'all 0.2s',
+                                                            cursor: 'pointer',
+                                                            textAlign: 'center',
+                                                        }}
+                                                    >
+                                                        <div>{opt.label}</div>
+                                                        <div style={{ fontSize: '0.72rem', marginTop: 3, opacity: 0.7 }}>{opt.desc}</div>
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            {applyTiming === 'schedule' && (
+                                                <div>
+                                                    <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 8, display: 'block' }}>Pick date & time</label>
+                                                    <input
+                                                        id="scheduled-at-picker"
+                                                        type="datetime-local"
+                                                        value={scheduledAt}
+                                                        min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
+                                                        onChange={e => setScheduledAt(e.target.value)}
+                                                        style={{
+                                                            width: '100%',
+                                                            background: 'var(--bg-secondary)',
+                                                            border: '1px solid #10b981',
+                                                            color: 'white',
+                                                            borderRadius: 12,
+                                                            padding: '12px 16px',
+                                                            fontSize: '0.95rem',
+                                                            colorScheme: 'dark',
+                                                        }}
+                                                    />
+                                                    {scheduledAt && (
+                                                        <div style={{ marginTop: 8, fontSize: '0.8rem', color: '#6ee7b7', display: 'flex', alignItems: 'center', gap: 6 }}>
+                                                            ✅ Will send at: <strong>{new Date(scheduledAt).toLocaleString()}</strong>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+
                                         <div className="alert alert-warning" style={{ marginBottom: 16 }}>
                                             <span>⚠</span>
                                             <span>Make sure <strong>GMAIL_USER</strong> and <strong>GMAIL_APP_PASSWORD</strong> are set in <code>server/.env</code> before sending.</span>
@@ -1021,9 +1365,14 @@ export default function OutreachPage() {
                                                 className="btn btn-success btn-lg"
                                                 style={{ flex: 1 }}
                                                 onClick={handleSend}
-                                                disabled={sending || !emailBody}
+                                                disabled={sending || !emailBody || (applyTiming === 'schedule' && !scheduledAt)}
                                             >
-                                                {sending ? <><span className="spinner" /> Sending...</> : `🚀 Send to ${allRecipients.length} Recipient${allRecipients.length !== 1 ? 's' : ''}`}
+                                                {sending
+                                                    ? <><span className="spinner" /> {resumeOptimizing ? 'Optimizing Resume...' : 'Sending...'}</>
+                                                    : applyTiming === 'schedule'
+                                                        ? `🗓 Schedule Application`
+                                                        : `🚀 Send to ${allRecipients.length} Recipient${allRecipients.length !== 1 ? 's' : ''}`
+                                                }
                                             </button>
                                         </div>
                                     </>

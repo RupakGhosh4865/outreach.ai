@@ -4,9 +4,11 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
 import path from 'path';
+import crypto from 'crypto';
 import Groq from "groq-sdk";
 import { fileURLToPath } from 'url';
 import nodemailer from 'nodemailer';
+import cron from 'node-cron';
 
 import JobRequest from '../models/JobRequest.js';
 import UserProfile from '../models/UserProfile.js';
@@ -16,6 +18,12 @@ import Reply from '../models/Reply.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// ── Tmp directory for optimised resumes ─────────────────────────────────────
+const TMP_RESUME_DIR = path.join(__dirname, '..', 'tmp', 'resumes');
+if (!fs.existsSync(TMP_RESUME_DIR)) fs.mkdirSync(TMP_RESUME_DIR, { recursive: true });
+
+const RESUME_OPTIMIZER_URL = process.env.RESUME_OPTIMIZER_URL || 'http://localhost:8002';
 
 const router = express.Router();
 
@@ -190,6 +198,181 @@ async function parseResume(resumePath) {
     }
 }
 
+/**
+ * Call the Python Resume Optimizer, pick the best-matching resume,
+ * compile it to PDF, save it to /tmp/resumes/, and return metadata.
+ *
+ * @returns {{ pdfPath: string, resumeText: string, selectedResume: string, matchScore: number } | null}
+ */
+// ── Optimization cache: coalesces concurrent calls and lets the UI reuse
+// results computed by autopilot/send (and vice versa) for the same JD.
+const optimCache = new Map(); // jdHash -> { status, promise, result, error, createdAt }
+const OPTIM_TTL_MS = 30 * 60 * 1000;
+const jdHash = (jd) => crypto.createHash('sha256').update(jd.trim().toLowerCase()).digest('hex').slice(0, 16);
+
+setInterval(() => {
+    const now = Date.now();
+    for (const [key, entry] of optimCache) {
+        if (now - entry.createdAt > OPTIM_TTL_MS) {
+            if (entry.result?.pdfPath) {
+                try { fs.unlinkSync(entry.result.pdfPath); } catch { /* non-fatal */ }
+            }
+            optimCache.delete(key);
+        }
+    }
+}, 5 * 60 * 1000).unref();
+
+async function getOptimizedResumeForJob(jobDescription) {
+    const key = jdHash(jobDescription);
+    const cached = optimCache.get(key);
+    if (cached) {
+        if (cached.status === 'pending') return cached.promise;
+        if (cached.status === 'done' && Date.now() - cached.createdAt < OPTIM_TTL_MS
+            && cached.result?.pdfPath && fs.existsSync(cached.result.pdfPath)) {
+            return cached.result;
+        }
+        optimCache.delete(key);
+    }
+
+    const entry = { status: 'pending', promise: null, result: null, error: null, createdAt: Date.now() };
+    entry.promise = doOptimizeResume(jobDescription).then((result) => {
+        entry.status = result ? 'done' : 'failed';
+        entry.result = result;
+        if (!result) entry.error = 'Optimization failed';
+        return result;
+    });
+    optimCache.set(key, entry);
+    return entry.promise;
+}
+
+async function doOptimizeResume(jobDescription) {
+    try {
+        // 1. Ask the optimizer to score & rewrite both resumes
+        const optimizeRes = await axios.post(
+            `${RESUME_OPTIMIZER_URL}/api/optimize-for-job`,
+            { job_description: jobDescription },
+            { timeout: 90000 } // LaTeX inference can take up to 90s
+        );
+        const data = optimizeRes.data;
+
+        // 2. Pick the higher-scoring resume
+        const genaiScore = data?.resume_genai?.match_score ?? 0;
+        const backendScore = data?.resume_backend?.match_score ?? 0;
+        const selectedKey = genaiScore >= backendScore ? 'resume_genai' : 'resume_backend';
+        const selectedResume = genaiScore >= backendScore ? 'genai' : 'backend';
+        const matchScore = Math.max(genaiScore, backendScore);
+        const latexCode = data[selectedKey]?.optimized_resume_latex;
+
+        if (!latexCode) throw new Error('No LaTeX returned from optimizer');
+
+        // 3. Compile LaTeX → PDF via the optimizer's compile endpoint
+        const compileRes = await axios.post(
+            `${RESUME_OPTIMIZER_URL}/api/compile-pdf`,
+            { latex_code: latexCode },
+            { responseType: 'arraybuffer', timeout: 30000 }
+        );
+
+        // 4. Save to tmp
+        const pdfFilename = `optimized_${selectedResume}_${Date.now()}.pdf`;
+        const pdfPath = path.join(TMP_RESUME_DIR, pdfFilename);
+        fs.writeFileSync(pdfPath, Buffer.from(compileRes.data));
+
+        // 5. Also extract text for prompt enrichment
+        let resumeText = '';
+        try {
+            const { createRequire } = await import('module');
+            const require = createRequire(import.meta.url);
+            const pdfParse = require('pdf-parse');
+            const parsed = await pdfParse(fs.readFileSync(pdfPath));
+            resumeText = parsed.text.slice(0, 4000);
+        } catch { /* non-fatal */ }
+
+        console.log(`[ResumeOptimizer] Selected: ${selectedResume} (score: ${matchScore}) → ${pdfFilename}`);
+        const selected = data[selectedKey] || {};
+        return {
+            pdfPath,
+            resumeText,
+            selectedResume,
+            matchScore,
+            genaiScore,
+            backendScore,
+            addedKeywords: selected.added_keywords || [],
+            removedKeywords: selected.removed_keywords || [],
+            atsTips: selected.ats_tips || [],
+            projectSuggestions: selected.project_suggestions || [],
+        };
+    } catch (err) {
+        console.error('[ResumeOptimizer] Failed, falling back to profile resume:', err.message);
+        return null;
+    }
+}
+
+/** Fire a saved JobRequest email (used by the scheduler cron) */
+async function fireScheduledJob(jobRecord) {
+    try {
+        const profile = await UserProfile.findOne({ email: jobRecord.userEmail });
+        const gmailUser = process.env.GMAIL_USER;
+        const gmailPass = process.env.GMAIL_APP_PASSWORD;
+        if (!gmailUser || !gmailPass || !profile) return;
+
+        const transporter = nodemailer.createTransport({
+            service: 'gmail',
+            auth: { user: gmailUser, pass: gmailPass },
+        });
+
+        const attachments = [];
+        if (profile.resumePath && fs.existsSync(profile.resumePath)) {
+            attachments.push({
+                filename: profile.resumeOriginalName || 'Resume.pdf',
+                path: profile.resumePath,
+            });
+        }
+
+        const sentTo = [];
+        for (const email of jobRecord.sentTo) {
+            try {
+                await transporter.sendMail({
+                    from: `"${profile.name || jobRecord.userEmail}" <${gmailUser}>`,
+                    to: email,
+                    subject: jobRecord.generatedEmailSubject,
+                    text: jobRecord.generatedEmailBody,
+                    html: `<div style="font-family:sans-serif;white-space:pre-wrap;line-height:1.6;color:#333;">${jobRecord.generatedEmailBody}</div>`,
+                    attachments,
+                });
+                sentTo.push(email);
+            } catch (e) {
+                console.error(`[Scheduler] Failed to send to ${email}:`, e.message);
+            }
+        }
+
+        jobRecord.status = sentTo.length > 0 ? 'sent' : 'failed';
+        jobRecord.sentAt = new Date();
+        jobRecord.isScheduled = false;
+        await jobRecord.save();
+        console.log(`[Scheduler] Fired job ${jobRecord._id} → sent to ${sentTo.length} recipient(s)`);
+    } catch (err) {
+        console.error('[Scheduler] Error firing job:', err.message);
+    }
+}
+
+// ── Scheduled Send Cron: runs every minute ───────────────────────────────────
+cron.schedule('* * * * *', async () => {
+    try {
+        const now = new Date();
+        const dueJobs = await JobRequest.find({
+            isScheduled: true,
+            status: 'draft',
+            scheduledAt: { $lte: now },
+        });
+        for (const job of dueJobs) {
+            console.log(`[Scheduler] Due job found: ${job._id}`);
+            await fireScheduledJob(job);
+        }
+    } catch (err) {
+        console.error('[Scheduler] Cron error:', err.message);
+    }
+});
+
 /** Generate ONE high-quality personalised email variant using Groq (Llama 3.3) */
 async function generateSingleVariant({ profile, resumeText, emailType, jobTitle, companyName, jobDescription, recipientName, extraContext }) {
     const typeMap = {
@@ -211,10 +394,11 @@ Sender Profile (Mandatory Links):
 - LinkedIn: ${profile?.linkedinUrl || 'Not provided'}
 - GitHub: ${profile?.githubUrl || 'Not provided'}
 - Portfolio: ${profile?.portfolioUrl || 'Not provided'}
+- Resume Link: ${profile?.resumeLink || 'Not provided'}
 
 Sender Background (Context):
 - Tech Stack: ${profile?.techStack || 'Not specified'}
-- Experience: ${profile?.experienceYears ? profile.experienceYears + ' years' : 'Not specified'}
+- Experience: ${profile?.experienceYears || 0} years and ${profile?.experienceMonths || 0} months
 - Target Roles: ${profile?.targetRoles || 'Not specified'}
 
 Job Description (excerpt):
@@ -232,11 +416,12 @@ STRUCTURE:
 3. Proof of Work (Bullet points): Highlight 2 specific achievements from your resume or projects.
 4. Professional Links: Integrate GitHub/Portfolio links naturally as evidence of your skills.
 5. Call to Action: Clear, respectful request for a chat or referral.
-6. Mention that your resume is attached for their review.
+6. Mention that your resume is attached for their review (and mention the resume link if provided).
 7. MANDATORY Links Section: Always end the email with a clearly labelled block:
    LinkedIn: [linkedin url]
    GitHub: [github url]
    Portfolio: [portfolio url]
+   Resume: [resume link]
    (Only include a link if it was provided. Never omit this section.)
 
 FORMATTING RULES:
@@ -460,8 +645,8 @@ router.get('/company-contacts', async (req, res) => {
 // POST /api/jobs/autopilot
 router.post('/autopilot', async (req, res) => {
     try {
-        const { url, userEmail, emailType, extraContext } = req.body;
-        if (!url || !userEmail) return res.status(400).json({ message: 'url and userEmail are required.' });
+        const { url, jobText, userEmail, emailType, extraContext } = req.body;
+        if ((!url && !jobText) || !userEmail) return res.status(400).json({ message: 'URL/JobText and userEmail are required.' });
 
         // 1. Check user & subscription limits
         let profile = await UserProfile.findOne({ email: userEmail });
@@ -488,9 +673,15 @@ router.post('/autopilot', async (req, res) => {
         console.log(`[Autopilot] Processing ${url} for ${userEmail} (${plan} plan)`);
 
         // 2. Scraping Job Details
-        const rawText = await fetchUrlContent(url);
+        let rawText = '';
+        if (url) {
+            rawText = await fetchUrlContent(url);
+        } else {
+            rawText = jobText;
+        }
+        
         const systemPrompt = "You are a specialized job data extractor. Extract structured information from the provided raw text.";
-        const userPrompt = `Raw Text from URL: "${rawText.slice(0, 5000)}"\n\nTASK:\nExtract JSON: { "companyName": "...", "jobTitle": "...", "jobDescription": "..." }\n\nRules: Max 1000 chars for description. ONLY return JSON.`;
+        const userPrompt = `Raw Text from ${url ? 'URL' : 'User Input'}: "${rawText.slice(0, 5000)}"\n\nTASK:\nExtract JSON: { "companyName": "...", "jobTitle": "...", "jobDescription": "..." }\n\nRules: Max 1000 chars for description. ONLY return JSON.`;
 
         const completion = await groq.chat.completions.create({
             model: "llama-3.3-70b-versatile",
@@ -530,9 +721,24 @@ router.post('/autopilot', async (req, res) => {
         const maxEmails = limits[plan]?.emails || 5;
         employees = employees.slice(0, maxEmails);
 
-        // 4. Parse Resume
+        // 4. Optimise Resume against the job description (progress tracked client-side)
         let resumeText = '';
-        if (profile.resumePath) {
+        let optimizedPdfPath = null;
+        let optimizedResumeUsed = null;
+        let optimizedMatchScore = null;
+
+        if (job.jobDescription) {
+            console.log('[Autopilot] Starting resume optimization...');
+            const optimResult = await getOptimizedResumeForJob(job.jobDescription);
+            if (optimResult) {
+                resumeText = optimResult.resumeText;
+                optimizedPdfPath = optimResult.pdfPath;
+                optimizedResumeUsed = optimResult.selectedResume;
+                optimizedMatchScore = optimResult.matchScore;
+            }
+        }
+        // fallback to profile resume text if optimization failed
+        if (!resumeText && profile.resumePath) {
             resumeText = await parseResume(profile.resumePath);
         }
 
@@ -567,6 +773,8 @@ router.post('/autopilot', async (req, res) => {
             job,
             results,
             campaignsUsed: profile.subscription.campaignsUsed,
+            optimizedResumeUsed,
+            optimizedMatchScore,
             message: 'Autopilot campaign prepared successfully!'
         });
 
@@ -626,6 +834,7 @@ router.post('/send', async (req, res) => {
             manualPhone,
             employees,
             followUpDays,
+            scheduledAt,  // ISO datetime string — null / undefined = send immediately
         } = req.body;
 
         if (!userEmail || (!recipients?.length && !manualEmail) || !subject || !body) {
@@ -645,11 +854,76 @@ router.post('/send', async (req, res) => {
         });
 
         const profile = await UserProfile.findOne({ email: userEmail });
+
+        // ── Optimise Resume ────────────────────────────────────────────────────
+        let optimizedPdfPath = null;
+        let optimizedResumeUsed = null;
+        let optimizedMatchScore = null;
+        let optimizedAddedKeywords = [];
+        let optimizedAtsTips = [];
+
+        if (jobDescription) {
+            console.log('[Send] Optimizing resume for job...');
+            const optimResult = await getOptimizedResumeForJob(jobDescription);
+            if (optimResult) {
+                optimizedPdfPath = optimResult.pdfPath;
+                optimizedResumeUsed = optimResult.selectedResume;
+                optimizedMatchScore = optimResult.matchScore;
+                optimizedAddedKeywords = optimResult.addedKeywords || [];
+                optimizedAtsTips = optimResult.atsTips || [];
+            }
+        }
+
         const attachments = [];
-        if (profile?.resumePath && fs.existsSync(profile.resumePath)) {
+        if (optimizedPdfPath && fs.existsSync(optimizedPdfPath)) {
+            // Use the freshly optimised resume PDF
+            attachments.push({
+                filename: `Optimized_Resume_${jobTitle || 'Application'}.pdf`,
+                path: optimizedPdfPath,
+            });
+        } else if (profile?.resumePath && fs.existsSync(profile.resumePath)) {
+            // Fallback to the profile's stored resume
             attachments.push({
                 filename: profile.resumeOriginalName || 'Resume.pdf',
                 path: profile.resumePath,
+            });
+        }
+
+        // ── Scheduled Send ────────────────────────────────────────────────────
+        const sendScheduled = scheduledAt && new Date(scheduledAt) > new Date();
+        if (sendScheduled) {
+            // Save record for the cron job to fire later; don't send now
+            const jobRecord = new JobRequest({
+                userEmail,
+                linkedinUrl: linkedinUrl || '',
+                companyName: companyName || '',
+                jobTitle: jobTitle || '',
+                jobDescription: jobDescription || '',
+                emailType: emailType || 'referral',
+                extraContext: extraContext || '',
+                manualEmail: manualEmail || '',
+                manualPhone: manualPhone || '',
+                employees: employees || [],
+                generatedEmailSubject: subject,
+                generatedEmailBody: body,
+                sentTo: recipients.map(r => r.email),
+                status: 'draft',
+                scheduledAt: new Date(scheduledAt),
+                isScheduled: true,
+                optimizedResumeUsed,
+                optimizedMatchScore,
+                optimizedAddedKeywords,
+                optimizedAtsTips,
+                followUpDays: followUpDays || 0,
+                followUpStatus: 'none',
+            });
+            await jobRecord.save();
+            return res.json({
+                message: `✅ Email scheduled for ${new Date(scheduledAt).toLocaleString()}.`,
+                scheduled: true,
+                jobId: jobRecord._id,
+                optimizedResumeUsed,
+                optimizedMatchScore,
             });
         }
 
@@ -672,6 +946,9 @@ router.post('/send', async (req, res) => {
             }
         }
 
+        // Optimized PDF cleanup is owned by the optimCache TTL sweep so the
+        // preview/download URL keeps working after sending.
+
         // Save to DB
         const jobRecord = new JobRequest({
             userEmail,
@@ -684,9 +961,15 @@ router.post('/send', async (req, res) => {
             manualEmail: manualEmail || '',
             manualPhone: manualPhone || '',
             employees: employees || [],
+            generatedEmailSubject: subject,
+            generatedEmailBody: body,
             sentTo,
             status: sentTo.length > 0 ? 'sent' : 'failed',
             sentAt: new Date(),
+            optimizedResumeUsed,
+            optimizedMatchScore,
+            optimizedAddedKeywords,
+            optimizedAtsTips,
             // Follow-up scheduling
             followUpDays: followUpDays || 0,
             followUpStatus: (followUpDays !== 0 && sentTo.length > 0) ? 'pending' : 'none',
@@ -703,9 +986,31 @@ router.post('/send', async (req, res) => {
             sentTo,
             errors,
             jobId: jobRecord._id,
+            optimizedResumeUsed,
+            optimizedMatchScore,
         });
     } catch (err) {
         console.error('Send email error:', err);
+        res.status(500).json({ message: err.message });
+    }
+});
+
+// POST /api/jobs/schedule — update scheduledAt for a saved job
+router.post('/schedule', async (req, res) => {
+    try {
+        const { jobId, scheduledAt } = req.body;
+        if (!jobId || !scheduledAt) return res.status(400).json({ message: 'jobId and scheduledAt are required.' });
+
+        const job = await JobRequest.findById(jobId);
+        if (!job) return res.status(404).json({ message: 'Job not found.' });
+
+        job.scheduledAt = new Date(scheduledAt);
+        job.isScheduled = true;
+        job.status = 'draft';
+        await job.save();
+
+        res.json({ message: `Scheduled for ${new Date(scheduledAt).toLocaleString()}`, jobId });
+    } catch (err) {
         res.status(500).json({ message: err.message });
     }
 });
@@ -725,5 +1030,124 @@ router.get('/history', async (req, res) => {
 
 // Removed Inbox-related routes
 
+
+// ── Async resume optimization (UI-facing) ───────────────────────────────────
+
+const publicOptimResult = (key, result) => ({
+    selectedResume: result.selectedResume,
+    matchScore: result.matchScore,
+    genaiScore: result.genaiScore,
+    backendScore: result.backendScore,
+    addedKeywords: result.addedKeywords,
+    removedKeywords: result.removedKeywords,
+    atsTips: result.atsTips,
+    projectSuggestions: result.projectSuggestions,
+    pdfUrl: `/api/jobs/optimize-resume/pdf?key=${key}`,
+});
+
+// POST /api/jobs/optimize-resume — kick off (or reuse) optimization for a JD
+router.post('/optimize-resume', (req, res) => {
+    const { jobDescription } = req.body;
+    if (!jobDescription?.trim()) return res.status(400).json({ message: 'jobDescription is required.' });
+
+    const key = jdHash(jobDescription);
+    const entry = optimCache.get(key);
+    if (entry?.status === 'done' && entry.result) {
+        return res.json({ key, status: 'done', result: publicOptimResult(key, entry.result) });
+    }
+    if (!entry || entry.status === 'failed') {
+        getOptimizedResumeForJob(jobDescription).catch(() => { /* status tracked in cache */ });
+    }
+    res.status(202).json({ key, status: 'pending' });
+});
+
+// GET /api/jobs/optimize-resume/status?key=
+router.get('/optimize-resume/status', (req, res) => {
+    const entry = optimCache.get(req.query.key);
+    if (!entry) return res.status(404).json({ status: 'unknown' });
+    if (entry.status === 'done' && entry.result) {
+        return res.json({ status: 'done', result: publicOptimResult(req.query.key, entry.result) });
+    }
+    res.json({ status: entry.status, error: entry.error || undefined });
+});
+
+// GET /api/jobs/optimize-resume/pdf?key= — inline preview / download
+router.get('/optimize-resume/pdf', (req, res) => {
+    const entry = optimCache.get(req.query.key);
+    const pdfPath = entry?.result?.pdfPath;
+    if (entry?.status !== 'done' || !pdfPath || !fs.existsSync(pdfPath)) {
+        return res.status(404).json({ message: 'Optimized PDF not available.' });
+    }
+    res.setHeader('Content-Disposition', 'inline; filename="Optimized_Resume.pdf"');
+    res.sendFile(pdfPath);
+});
+
+// POST /api/jobs/analyze-fit
+router.post('/analyze-fit', async (req, res) => {
+    try {
+        const { jobDescription, userEmail } = req.body;
+        if (!jobDescription || !userEmail) return res.status(400).json({ message: 'jobDescription and userEmail are required.' });
+
+        // 1. Fetch user profile
+        const profile = await UserProfile.findOne({ email: userEmail });
+        if (!profile) return res.status(404).json({ message: 'Profile not found.' });
+
+        // 2. Parse resumes
+        const resumes = { main: '', genai: '', backend: '' };
+        if (profile.resumePath) resumes.main = await parseResume(profile.resumePath);
+        if (profile.resumeGenaiPath) resumes.genai = await parseResume(profile.resumeGenaiPath);
+        if (profile.resumeBackendPath) resumes.backend = await parseResume(profile.resumeBackendPath);
+
+        if (!resumes.main && !resumes.genai && !resumes.backend) {
+            return res.status(400).json({ message: 'No resumes found in profile.' });
+        }
+
+        // 3. Prompt Groq for fast ATS scan
+        const systemPrompt = "You are an expert ATS Resume Analyzer. Your task is to output a raw JSON object comparing the user's resumes against the job description. Do NOT output markdown. Do NOT output explanations.";
+        const userPrompt = `
+Job Description:
+${jobDescription.slice(0, 4000)}
+
+--- Main Resume ---
+${resumes.main.slice(0, 3000) || "none"}
+
+--- Gen AI Resume ---
+${resumes.genai.slice(0, 3000) || "none"}
+
+--- Backend Resume ---
+${resumes.backend.slice(0, 3000) || "none"}
+
+TASK: Evaluate these resumes against the job. Output a JSON object with this exact structure:
+{
+  "scores": {
+    "main": 65,
+    "genai": 85,
+    "backend": 40
+  },
+  "recommendedResume": "genai", // one of: "main", "genai", "backend" (pick the best one)
+  "advice": [
+    "Skill gap: Missing AWS experience.",
+    "Formatting: Include more metrics."
+  ]
+}
+`;
+
+        const completion = await groq.chat.completions.create({
+            model: "llama-3.3-70b-versatile",
+            messages: [
+                { role: "system", content: systemPrompt },
+                { role: "user", content: userPrompt }
+            ],
+            response_format: { type: "json_object" },
+            temperature: 0.2,
+        });
+
+        const result = JSON.parse(completion.choices[0].message.content);
+        res.json(result);
+    } catch (err) {
+        console.error('Analyze fit error:', err.message);
+        res.status(500).json({ message: err.message });
+    }
+});
 
 export default router;

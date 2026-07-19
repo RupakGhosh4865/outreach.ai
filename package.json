@@ -1,0 +1,16 @@
+{
+  "name": "outreachai-root",
+  "version": "1.0.0",
+  "description": "Root dev runner for OutreachAI — starts Node server, Next.js client, and Python Resume Optimizer",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently --names \"NODE,CLIENT,OPTIMIZER\" --prefix-colors \"cyan,magenta,yellow\" \"npm run dev:server\" \"npm run dev:client\" \"npm run dev:optimizer\"",
+    "dev:server": "cd server && npm run dev",
+    "dev:client": "cd client && npm run dev",
+    "dev:optimizer": "cd ResumeOptimiser/backend && .\\venv\\Scripts\\python.exe -m uvicorn main:app --host 0.0.0.0 --port 8002 --reload",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}

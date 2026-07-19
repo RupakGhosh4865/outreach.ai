@@ -35,6 +35,14 @@ const jobRequestSchema = new mongoose.Schema({
     },
     createdAt: { type: Date, default: Date.now },
     sentAt: { type: Date, default: null },
+    // Apply Timing / Scheduling
+    scheduledAt: { type: Date, default: null },         // null = send immediately
+    isScheduled: { type: Boolean, default: false },     // true if user picked a future send time
+    // Resume Optimizer Integration
+    optimizedResumeUsed: { type: String, default: null }, // 'genai' | 'backend' | null
+    optimizedMatchScore: { type: Number, default: null }, // ATS match score of selected resume
+    optimizedAddedKeywords: { type: [String], default: [] },
+    optimizedAtsTips: { type: [String], default: [] },
     // Follow-up System fields
     followUpDays: { type: Number, default: 0 }, // 0 = no follow-up, 3, 5, 7 etc.
     followUpDate: { type: Date, default: null },

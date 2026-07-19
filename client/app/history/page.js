@@ -42,6 +42,18 @@ export default function HistoryPage() {
         companies: [...new Set(jobs.map(j => j.companyName).filter(Boolean))].length,
     };
 
+    // Human-readable apply time (createdAt → sentAt)
+    function applyTime(job) {
+        if (!job.sentAt || !job.createdAt) return null;
+        const ms = new Date(job.sentAt) - new Date(job.createdAt);
+        if (ms < 0) return null;
+        const secs = Math.floor(ms / 1000);
+        if (secs < 60) return `${secs}s`;
+        const mins = Math.floor(secs / 60);
+        const rem  = secs % 60;
+        return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
+    }
+
     return (
         <AuthGuard>
             <main className="page">
@@ -93,13 +105,15 @@ export default function HistoryPage() {
                                                 <thead>
                                                     <tr>
                                                         <th>Company</th>
-                                                        <th>Role</th>
-                                                        <th>Type</th>
-                                                        <th>Recipients</th>
-                                                        <th>Follow-Up</th>
-                                                        <th>Status</th>
-                                                        <th>Date</th>
-                                                        <th></th>
+                                                         <th>Role</th>
+                                                         <th>Type</th>
+                                                         <th>Recipients</th>
+                                                         <th>Resume</th>
+                                                         <th>Apply Time</th>
+                                                         <th>Follow-Up</th>
+                                                         <th>Status</th>
+                                                         <th>Date</th>
+                                                         <th></th>
                                                     </tr>
                                                 </thead>
                                                 <tbody>
@@ -116,6 +130,31 @@ export default function HistoryPage() {
                                                                 </span>
                                                             </td>
                                                             <td>{j.sentTo?.length || 0}</td>
+                                                             {/* Resume optimization badge */}
+                                                             <td>
+                                                                 {j.optimizedResumeUsed ? (
+                                                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                                                                         <span className="badge badge-green" style={{ fontSize: '0.65rem' }}>
+                                                                             {j.optimizedResumeUsed === 'genai' ? '🤖 GenAI' : '⚙️ Backend'}
+                                                                         </span>
+                                                                         {j.optimizedMatchScore && (
+                                                                             <span style={{ fontSize: '0.65rem', color: '#10b981' }}>{j.optimizedMatchScore}% ATS</span>
+                                                                         )}
+                                                                     </div>
+                                                                 ) : (
+                                                                     <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>
+                                                                 )}
+                                                             </td>
+                                                             {/* Apply time */}
+                                                             <td>
+                                                                 {applyTime(j) ? (
+                                                                     <span style={{ fontSize: '0.8rem', color: '#a5b4fc', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4 }}>
+                                                                         ⏱ {applyTime(j)}
+                                                                     </span>
+                                                                 ) : (
+                                                                     <span style={{ color: 'var(--text-muted)', fontSize: '0.75rem' }}>—</span>
+                                                                 )}
+                                                             </td>
                                                             <td>
                                                                 {j.followUpDays !== 0 ? (
                                                                     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -187,6 +226,36 @@ export default function HistoryPage() {
                                                     {(selected.sentTo || []).length === 0 && <span className="badge badge-red">Not sent</span>}
                                                 </div>
                                             </div>
+
+                                             {/* Resume optimization detail */}
+                                             {selected.optimizedResumeUsed && (
+                                                 <div style={{ marginBottom: 16, padding: '12px 14px', background: 'rgba(16,185,129,0.06)', borderRadius: 10, border: '1px solid rgba(16,185,129,0.2)' }}>
+                                                     <div style={{ fontSize: '0.7rem', color: '#10b981', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                                                         🧬 RESUME USED
+                                                     </div>
+                                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                         <span style={{ fontSize: '0.88rem', fontWeight: 600 }}>
+                                                             {selected.optimizedResumeUsed === 'genai' ? '🤖 Gen AI Resume' : '⚙️ Backend Resume'}
+                                                         </span>
+                                                         {selected.optimizedMatchScore && (
+                                                             <span className="badge badge-green">{selected.optimizedMatchScore}% ATS Match</span>
+                                                         )}
+                                                     </div>
+                                                 </div>
+                                             )}
+
+                                             {/* Apply time detail */}
+                                             {applyTime(selected) && (
+                                                 <div style={{ marginBottom: 16, padding: '12px 14px', background: 'rgba(165,180,252,0.06)', borderRadius: 10, border: '1px solid rgba(165,180,252,0.15)' }}>
+                                                     <div style={{ fontSize: '0.7rem', color: '#a5b4fc', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 6 }}>
+                                                         ⏱ APPLY TIME
+                                                     </div>
+                                                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                                         <span style={{ fontSize: '0.88rem', color: 'var(--text-secondary)' }}>Time from start to send</span>
+                                                         <span style={{ fontSize: '1rem', fontWeight: 700, color: '#a5b4fc' }}>{applyTime(selected)}</span>
+                                                     </div>
+                                                 </div>
+                                             )}
 
                                             {selected.followUpDays > 0 && (
                                                 <div style={{ marginBottom: 16, padding: '12px', background: 'rgba(108, 99, 255, 0.05)', borderRadius: '10px', border: '1px solid var(--border)' }}>

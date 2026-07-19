@@ -78,7 +78,7 @@ It should:
 Rules:
 - Professional tone.
 - No placeholders like [Name]. Use "Hi there" or "Dear Team".
-- Mention that the resume is still attached for convenience.`;
+- Mention that the resume is still attached (and/or provide the resume link: ${profile.resumeLink || 'N/A'}) for convenience.`;
 
         const res = await groq.chat.completions.create({
             model: "llama-3.3-70b-versatile",

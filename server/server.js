@@ -12,6 +12,7 @@ import { fileURLToPath } from 'url';
 
 import profileRouter from './routes/profile.js';
 import jobsRouter from './routes/jobs.js';
+import jobSearchRouter from './routes/jobSearch.js';
 import authRouter from './routes/auth.js';
 import passport from './config/passport.js';
 import session from 'express-session';
@@ -75,6 +76,7 @@ connectMongo();
 // ─── Routes ──────────────────────────────────────────────────────────────────
 app.use('/api/profile', profileRouter);
 app.use('/api/jobs', jobsRouter);
+app.use('/api/job-search', jobSearchRouter);
 app.use('/api/auth', authRouter);
 
 // Health check
