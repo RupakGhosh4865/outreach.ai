@@ -5,6 +5,9 @@ import Link from 'next/link';
 import AuthGuard from '../components/AuthGuard';
 import ResumeOptimizerPanel from '../components/ResumeOptimizerPanel';
 import UkJobFinder from '../components/UkJobFinder';
+import JobSources from '../components/JobSources';
+import JobRadar from '../components/JobRadar';
+import ApplicationPipeline from '../components/ApplicationPipeline';
 
 const API = 'http://localhost:5000';
 
@@ -44,6 +47,10 @@ export default function OutreachPage() {
     const [toasts, setToasts] = useState([]);
     const [loading, setLoading] = useState(false);
     const [isExtension, setIsExtension] = useState(false);
+    // Bumped whenever an application is created or changes state, so the
+    // pipeline panel reloads without waiting for its poll tick.
+    const [pipelineKey, setPipelineKey] = useState(0);
+    const refreshPipeline = () => setPipelineKey((k) => k + 1);
 
     // Step 1 state
     const [emailType, setEmailType] = useState('referral');
@@ -222,7 +229,7 @@ export default function OutreachPage() {
             const res = await fetch(`${API}/api/jobs/optimize-resume`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ jobDescription: jd }),
+                body: JSON.stringify({ jobDescription: jd, userEmail }),
             });
             const data = await res.json();
             if (!res.ok) { setOptimizeState({ status: 'failed' }); return; }
@@ -472,19 +479,26 @@ export default function OutreachPage() {
                 if (data.optimizedResumeUsed) {
                     setOptimizedResumeInfo({ selectedResume: data.optimizedResumeUsed, matchScore: data.optimizedMatchScore });
                 }
+                if (data.resumeError) {
+                    addToast(`⚠ Resume optimisation failed: ${data.resumeError}`, 'error');
+                }
+                if (data.attachmentStatus === 'missing') {
+                    addToast('⚠ No resume was attached — upload one on your profile.', 'error');
+                }
                 if (data.scheduled) {
                     addToast(`📅 ${data.message}`, 'success');
                     setTimeout(() => router.push('/history'), 2500);
                 } else {
                     addToast(`🎉 ${data.message}`, 'success');
-                    setTimeout(() => router.push('/history'), 2000);
+                    setTimeout(() => router.push('/history'), 3000);
                 }
             } else {
                 addToast(data.message || 'Failed to send emails.', 'error');
             }
-        } catch {
+        } catch (err) {
             setResumeOptimizing(false);
-            addToast('Send failed. Check server & Gmail credentials in .env', 'error');
+            console.error('Send failed:', err);
+            addToast(`Send failed: ${err.message}. Check the server & Gmail credentials in .env`, 'error');
         }
         setSending(false);
     }
@@ -940,10 +954,33 @@ export default function OutreachPage() {
 
                                 <ResumeOptimizerPanel apiBase={API} optimizeState={optimizeState} compact={isExtension} />
 
+                                <ApplicationPipeline
+                                    apiBase={API}
+                                    userEmail={userEmail}
+                                    isExtension={isExtension}
+                                    refreshKey={pipelineKey}
+                                />
+
+                                <JobRadar
+                                    apiBase={API}
+                                    userEmail={userEmail}
+                                    isExtension={isExtension}
+                                    onApplicationChange={refreshPipeline}
+                                />
+
+                                <JobSources
+                                    apiBase={API}
+                                    userEmail={userEmail}
+                                    isExtension={isExtension}
+                                    onApplicationChange={refreshPipeline}
+                                />
+
                                 <UkJobFinder
                                     apiBase={API}
                                     isExtension={isExtension}
                                     autopilotBusy={autopilot}
+                                    userEmail={userEmail}
+                                    onApplicationChange={refreshPipeline}
                                     onRunAutopilot={(job) => {
                                         const jobText = `${job.title} at ${job.company}${job.location ? ` (${job.location})` : ''}\n\n${job.description || ''}`;
                                         setPastedJobDescription(jobText);

@@ -13,7 +13,11 @@ import { fileURLToPath } from 'url';
 import profileRouter from './routes/profile.js';
 import jobsRouter from './routes/jobs.js';
 import jobSearchRouter from './routes/jobSearch.js';
+import applicationsRouter from './routes/applications.js';
+import jobSourcesRouter from './routes/jobSources.js';
+import jobRadarRouter from './routes/jobRadar.js';
 import authRouter from './routes/auth.js';
+import { sweepInterruptedSteps } from './services/applicationFsm.js';
 import passport from './config/passport.js';
 import session from 'express-session';
 import { initReminderService } from './services/reminderService.js';
@@ -60,6 +64,8 @@ async function connectMongo(retries = 5) {
         family: 4, // Force IPv4 — fixes DNS SRV resolution on many Windows/home routers
       });
       console.log('✅ Connected to MongoDB');
+      // Pipelines that were mid-flight when the process died can't resume themselves.
+      await sweepInterruptedSteps().catch((err) => console.error('[FSM] Sweep failed:', err.message));
       return;
     } catch (err) {
       console.error(`❌ MongoDB attempt ${i + 1}/${retries} failed:`, err.message);
@@ -77,6 +83,9 @@ connectMongo();
 app.use('/api/profile', profileRouter);
 app.use('/api/jobs', jobsRouter);
 app.use('/api/job-search', jobSearchRouter);
+app.use('/api/applications', applicationsRouter);
+app.use('/api/job-sources', jobSourcesRouter);
+app.use('/api/job-radar', jobRadarRouter);
 app.use('/api/auth', authRouter);
 
 // Health check

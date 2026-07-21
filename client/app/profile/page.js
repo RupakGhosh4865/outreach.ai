@@ -102,14 +102,21 @@ export default function ProfilePage() {
             const data = await res.json();
             if (res.ok) {
                 localStorage.setItem('jobreach_email', form.email);
-                addToast('Profile saved! Resumes synced to AI Optimizer ✨', 'success');
                 setExisting(data.profile);
-                setTimeout(() => router.push('/'), 1400);
+                if (data.optimizerSyncError) {
+                    // The profile saved — say so, but don't claim the optimizer is ready.
+                    addToast(`Profile saved, but the Resume Optimizer was not updated: ${data.optimizerSyncError}`, 'error');
+                    setTimeout(() => router.push('/'), 4000);
+                } else {
+                    addToast('Profile saved! Resumes synced to AI Optimizer ✨', 'success');
+                    setTimeout(() => router.push('/'), 1400);
+                }
             } else {
                 addToast(data.message || 'Failed to save profile.', 'error');
             }
-        } catch {
-            addToast('Could not connect to server. Make sure it is running.', 'error');
+        } catch (err) {
+            console.error('Profile save failed:', err);
+            addToast(`Could not save profile: ${err.message}. Make sure the server is running.`, 'error');
         }
         setLoading(false);
     }
