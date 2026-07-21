@@ -8,7 +8,10 @@ const jobResultSchema = new mongoose.Schema({
     salaryMin: Number,
     salaryMax: Number,
     postedAt: Date,
-    source: { type: String, enum: ['adzuna', 'jsearch'] },
+    closingDate: Date,
+    source: { type: String, enum: ['adzuna', 'jsearch', 'linkedin', 'indeed', 'glassdoor', 'wellfound', 'google', 'github', 'council'] },
+    sourceDetail: String,
+    visaSponsor: Boolean,
     applyUrl: String,
     description: String,
 }, { _id: false });
