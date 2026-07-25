@@ -1,0 +1,25 @@
+# Node & Vite
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+env/
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Optional IDE
+.vscode/
+.idea/
+
+# SQLite DB holds user resumes/history — never commit
+backend/resume_history.db
+backend/*.db
