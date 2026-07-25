@@ -17,11 +17,16 @@ client/out/
 # Python
 __pycache__/
 *.pyc
+venv/
+env/
 
-# ResumeOptimiser is its own git repository (Resume-saas), committed and pushed
-# separately. It is excluded here so the parent repo doesn't turn it into a
-# stray submodule pointer.
-ResumeOptimiser/
+# SQLite databases hold user resumes/history — never commit
+*.db
+
+# ResumeOptimiser (Resume-saas) is now vendored into this repo as regular files.
+# Its own build/dependency/secret artefacts are covered by the rules above.
+ResumeOptimiser/dist/
+ResumeOptimiser/dist-ssr/
 
 # Build artefacts / packaged extension
 *.zip
