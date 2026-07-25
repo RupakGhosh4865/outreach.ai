@@ -1,136 +1,129 @@
 'use client';
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+
+import Link from 'next/link';
+import { Check, Sparkles } from 'lucide-react';
+import { Badge, Card, cn } from '../components/ui';
+
+/**
+ * Paid tiers are defined server-side (services/pipeline.js PLAN_LIMITS) but
+ * billing isn't wired up yet, so only the free plan is presented as available.
+ * The others are shown as "coming soon" rather than as buyable.
+ */
+const PLANS = [
+    {
+        name: 'Free',
+        price: '£0',
+        period: 'forever',
+        available: true,
+        description: 'Enough to see whether this works for you.',
+        features: [
+            '3 campaigns a month',
+            '5 emails per campaign',
+            'Job-matched CV generation',
+            'ATS match scoring',
+            'Automatic follow-ups',
+        ],
+    },
+    {
+        name: 'Starter',
+        price: '£4.99',
+        period: 'per month',
+        popular: true,
+        description: 'For an active search.',
+        features: [
+            '20 campaigns a month',
+            '10 emails per campaign',
+            'Every outreach type',
+            'Job Radar across all sources',
+            'Send from your own mailbox',
+        ],
+    },
+    {
+        name: 'Pro',
+        price: '£9.99',
+        period: 'per month',
+        description: 'For a serious, sustained search.',
+        features: [
+            'Unlimited campaigns',
+            '15 emails per campaign',
+            'Priority AI processing',
+            'Reply tracking and analytics',
+            'Everything in Starter',
+        ],
+    },
+];
 
 export default function PricingPage() {
-    const router = useRouter();
-
-    const plans = [
-        {
-            name: 'Free',
-            price: '0',
-            period: '',
-            campaigns: '3 campaigns',
-            features: '5 emails/campaign, basic templates',
-            btnText: 'Current Plan',
-            btnClass: 'btn-secondary',
-        },
-        // Monthly subscription plans — commented out temporarily
-        // {
-        //     name: 'Starter',
-        //     price: '499',
-        //     period: '/month',
-        //     campaigns: '20 campaigns',
-        //     features: '10 emails/campaign, all outreach types',
-        //     btnText: 'Upgrade to Starter',
-        //     btnClass: 'btn-primary',
-        //     popular: true
-        // },
-        // {
-        //     name: 'Pro',
-        //     price: '999',
-        //     period: '/month',
-        //     campaigns: 'Unlimited',
-        //     features: '15 emails/campaign, priority AI, analytics',
-        //     btnText: 'Upgrade to Pro',
-        //     btnClass: 'btn-primary',
-        // },
-        // {
-        //     name: 'Team',
-        //     price: '2,999',
-        //     period: '/month',
-        //     campaigns: 'Unlimited (5 seats)',
-        //     features: 'Everything + team dashboard + API access',
-        //     btnText: 'Contact Sales',
-        //     btnClass: 'btn-primary',
-        // }
-    ];
-
-    const [toast, setToast] = useState(null);
-
-    const handleSelectPlan = (plan) => {
-        if (plan.name === 'Free') {
-            showToast('You are already on the Free plan!');
-            return;
-        }
-        if (plan.name === 'Team') {
-            showToast('Contacting sales... redirected soon.');
-            return;
-        }
-        showToast(`Redirecting to ${plan.name} check out...`);
-    };
-
-    const showToast = (msg) => {
-        setToast(msg);
-        setTimeout(() => setToast(null), 3000);
-    };
-
     return (
-        <main className="page">
-            {toast && (
-                <div className="toast-container">
-                    <div className="toast toast-info">
-                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="12" y1="16" x2="12" y2="12"></line><line x1="12" y1="8" x2="12.01" y2="8"></line></svg>
-                        {toast}
-                    </div>
-                </div>
-            )}
-            <div className="container">
-                <div className="page-header" style={{ textAlign: 'center', marginBottom: '60px' }}>
-                    <h1>Freemium SaaS Pricing</h1>
-                    <p>Scale your outreach with our tiered subscription plans.</p>
-                </div>
+        <div className="relative">
+            <div className="aurora" aria-hidden="true" />
 
-                <div className="pricing-table-container">
-                    <table className="pricing-table">
-                        <thead>
-                            <tr>
-                                <th className="th-plan">Plan</th>
-                                <th className="th-price">Price</th>
-                                <th className="th-campaigns">Campaigns/Month</th>
-                                <th className="th-features">Features</th>
-                                <th className="th-action"></th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {plans.map((plan, i) => (
-                                <tr key={i} className={plan.popular ? 'row-popular' : ''}>
-                                    <td className="td-plan">
-                                        <div className="plan-name-wrapper">
-                                            {plan.name}
-                                            {plan.popular && <span className="popular-tag">Popular</span>}
-                                        </div>
-                                    </td>
-                                    <td className="td-price">
-                                        <div className="price-display">
-                                            <span className="currency">₹</span>
-                                            <span className="amount">{plan.price}</span>
-                                            <span className="period">{plan.period}</span>
-                                        </div>
-                                    </td>
-                                    <td className="td-campaigns">{plan.campaigns}</td>
-                                    <td className="td-features">{plan.features}</td>
-                                    <td className="td-action">
-                                        <button
-                                            className={`btn ${plan.btnClass}`}
-                                            onClick={() => handleSelectPlan(plan)}
-                                        >
-                                            {plan.btnText}
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
-                </div>
-
-                <div style={{ marginTop: 60, textAlign: 'center' }}>
-                    <p style={{ color: 'var(--text-muted)', fontSize: '0.9rem', maxWidth: '600px', margin: '0 auto' }}>
-                        All plans include our core LinkedIn extraction and AI personalization engine.
-                        Taxes may apply based on your region.
+            <div className="shell page-top relative pb-24">
+                <header className="animate-fade-up mx-auto mb-12 max-w-2xl text-center">
+                    <Badge tone="brand" icon={Sparkles} className="mb-4">Pricing</Badge>
+                    <h1 className="text-3xl font-extrabold tracking-tight sm:text-4xl">
+                        Start free. Upgrade when it&apos;s working.
+                    </h1>
+                    <p className="mt-4 text-muted">
+                        No card required to begin. Paid plans aren&apos;t live yet — the free plan is fully functional.
                     </p>
+                </header>
+
+                <div className="mx-auto grid max-w-5xl items-start gap-5 lg:grid-cols-3">
+                    {PLANS.map((plan) => (
+                        <Card
+                            key={plan.name}
+                            className={cn(
+                                'relative flex h-full flex-col',
+                                plan.popular && 'border-brand/40 shadow-glow',
+                                !plan.available && 'opacity-75',
+                            )}
+                        >
+                            {plan.popular && (
+                                <span className="absolute -top-3 left-1/2 -translate-x-1/2">
+                                    <Badge tone="brand">Most popular</Badge>
+                                </span>
+                            )}
+
+                            <div className="mb-5">
+                                <div className="flex items-center gap-2">
+                                    <h2 className="text-lg font-bold">{plan.name}</h2>
+                                    {!plan.available && <Badge tone="neutral">Coming soon</Badge>}
+                                </div>
+                                <p className="mt-1 text-sm text-subtle">{plan.description}</p>
+                            </div>
+
+                            <p className="mb-6 flex items-baseline gap-1.5">
+                                <span className="text-4xl font-extrabold tracking-tight" data-numeric>{plan.price}</span>
+                                <span className="text-sm text-subtle">{plan.period}</span>
+                            </p>
+
+                            <ul className="mb-8 flex-1 space-y-3">
+                                {plan.features.map((f) => (
+                                    <li key={f} className="flex gap-2.5 text-sm">
+                                        <Check className="mt-0.5 size-4 shrink-0 text-brand" aria-hidden="true" />
+                                        <span className="text-muted">{f}</span>
+                                    </li>
+                                ))}
+                            </ul>
+
+                            {plan.available ? (
+                                <Link href="/outreach" className="ui-btn ui-btn-primary ui-btn-block">
+                                    Get started free
+                                </Link>
+                            ) : (
+                                <button type="button" disabled className="ui-btn ui-btn-secondary ui-btn-block">
+                                    Not available yet
+                                </button>
+                            )}
+                        </Card>
+                    ))}
                 </div>
+
+                <p className="mt-12 text-center text-sm text-subtle">
+                    Questions? <Link href="/" className="font-semibold text-brand underline underline-offset-2">Back to dashboard</Link>
+                </p>
             </div>
-        </main>
+        </div>
     );
 }

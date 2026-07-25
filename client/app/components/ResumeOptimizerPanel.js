@@ -1,100 +1,168 @@
 'use client';
 
-const chip = (bg, color) => ({
-    display: 'inline-block',
-    padding: '3px 10px',
-    borderRadius: 20,
-    fontSize: '0.75rem',
-    fontWeight: 600,
-    background: bg,
-    color,
-    margin: '2px 4px 2px 0',
-});
+import { useState } from 'react';
+import {
+    AlertTriangle, CheckCircle2, Download, Eye, Lightbulb, Loader2, Minus, Plus,
+} from 'lucide-react';
+import { Alert, Badge, Button, Card, cn } from './ui';
+import { downloadAuthedFile, openAuthedFile } from '@/lib/api';
 
-export default function ResumeOptimizerPanel({ apiBase, optimizeState, compact = false }) {
+/** Small pill for an added/removed keyword. */
+function Chip({ tone, children }) {
+    return (
+        <span
+            className={cn(
+                'inline-block rounded-full px-2.5 py-1 text-xs font-semibold',
+                tone === 'add' ? 'bg-success/12 text-success' : 'bg-danger/12 text-danger',
+            )}
+        >
+            {children}
+        </span>
+    );
+}
+
+function ScoreCard({ label, score, selected }) {
+    const tone = score > 75 ? 'text-success' : score > 50 ? 'text-warning' : 'text-danger';
+    return (
+        <div
+            className={cn(
+                'rounded-xl border p-3 transition-colors',
+                selected ? 'border-success/50 bg-success/6' : 'border-white/8 bg-white/2',
+            )}
+        >
+            <div className="mb-1 flex items-center justify-between gap-2">
+                <span className="text-[0.7rem] font-semibold uppercase tracking-wide text-subtle">{label}</span>
+                {selected && <Badge tone="success">Selected</Badge>}
+            </div>
+            <p className={cn('text-xl font-extrabold', tone)} data-numeric>{score ?? 0}%</p>
+        </div>
+    );
+}
+
+export default function ResumeOptimizerPanel({ optimizeState, compact = false }) {
+    const [busy, setBusy] = useState('');
+    const [fileError, setFileError] = useState('');
+
+    const withFile = (kind, fn) => async () => {
+        setBusy(kind);
+        setFileError('');
+        try {
+            await fn();
+        } catch (e) {
+            setFileError(e.message || 'Could not open the CV.');
+        }
+        setBusy('');
+    };
+
     if (!optimizeState) return null;
     const { status, key, result } = optimizeState;
 
     if (status === 'pending') {
         return (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(99,102,241,0.08)', borderRadius: 12, border: '1px solid rgba(99,102,241,0.2)', marginBottom: 16 }}>
-                <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2, flexShrink: 0 }} />
-                <span style={{ fontSize: '0.85rem', color: '#a5b4fc', fontWeight: 600 }}>
-                    ✨ Building your dynamic CV for this job… (~60-90s)
-                </span>
+            <div
+                className="mb-4 flex items-center gap-3 rounded-xl border border-info/25 bg-info/8 px-4 py-3"
+                role="status"
+                aria-live="polite"
+            >
+                <Loader2 className="size-4 shrink-0 animate-spin text-info" aria-hidden="true" />
+                <p className="text-sm font-semibold text-info">
+                    Building a CV matched to this job…
+                    <span className="ml-1 font-normal opacity-80">usually 60–90 seconds</span>
+                </p>
             </div>
         );
     }
 
     if (status === 'failed') {
         return (
-            <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(245,158,11,0.08)', borderRadius: 12, border: '1px solid rgba(245,158,11,0.25)', marginBottom: 16 }}>
-                <span>⚠️</span>
-                <span style={{ fontSize: '0.85rem', color: '#fbbf24' }}>
-                    Resume optimization unavailable — your profile resume will be attached instead.
-                </span>
+            <div className="mb-4 flex items-center gap-3 rounded-xl border border-warning/25 bg-warning/8 px-4 py-3" role="status">
+                <AlertTriangle className="size-4 shrink-0 text-warning" aria-hidden="true" />
+                <p className="text-sm text-warning">
+                    Couldn&apos;t build a matched CV — your profile resume will be attached instead.
+                </p>
             </div>
         );
     }
 
     if (status !== 'done' || !result) return null;
 
-    const pdfUrl = `${apiBase}${result.pdfUrl || `/api/jobs/optimize-resume/pdf?key=${key}`}`;
+    const pdfPath = result.pdfUrl || `/api/jobs/optimize-resume/pdf?key=${key}`;
     const winner = result.selectedResume;
 
+    const preview = withFile('preview', async () => {
+        // Falls back to a download if the browser blocked the new tab.
+        const opened = await openAuthedFile(pdfPath);
+        if (!opened) await downloadAuthedFile(pdfPath, 'Optimized_Resume.pdf');
+    });
+
+    const download = withFile('download', () => downloadAuthedFile(pdfPath, 'Optimized_Resume.pdf'));
+
     return (
-        <div style={{ padding: 16, background: 'rgba(16,185,129,0.05)', borderRadius: 12, border: '1px solid rgba(16,185,129,0.2)', marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, flexWrap: 'wrap', gap: 8 }}>
-                <div style={{ fontSize: '0.82rem', fontWeight: 800, color: '#10b981', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                    ✅ Dynamic CV Ready
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                    <a href={pdfUrl} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm" style={{ textDecoration: 'none' }}>
-                        👁 Preview PDF
-                    </a>
-                    <a href={pdfUrl} download="Optimized_Resume.pdf" className="btn btn-primary btn-sm" style={{ textDecoration: 'none' }}>
-                        ⬇ Download
-                    </a>
+        <Card className="mb-4 border-success/25 bg-success/4">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+                <p className="flex items-center gap-2 text-sm font-bold text-success">
+                    <CheckCircle2 className="size-4.5" aria-hidden="true" />
+                    Matched CV ready
+                </p>
+                <div className="flex gap-2">
+                    <Button type="button" variant="secondary" size="sm" loading={busy === 'preview'} onClick={preview}>
+                        {busy !== 'preview' && <Eye className="size-3.5" aria-hidden="true" />}
+                        Preview
+                    </Button>
+                    <Button type="button" size="sm" loading={busy === 'download'} onClick={download}>
+                        {busy !== 'download' && <Download className="size-3.5" aria-hidden="true" />}
+                        Download
+                    </Button>
                 </div>
             </div>
 
-            <div style={{ display: 'grid', gridTemplateColumns: compact ? '1fr' : '1fr 1fr', gap: 10, marginBottom: 12 }}>
-                {[['genai', '🤖 Gen AI', result.genaiScore], ['backend', '⚙️ Backend', result.backendScore]].map(([type, label, score]) => (
-                    <div key={type} style={{
-                        padding: 12, background: 'var(--bg-panel, rgba(255,255,255,0.03))', borderRadius: 8,
-                        border: winner === type ? '1px solid #10b981' : '1px solid var(--border, rgba(255,255,255,0.1))',
-                    }}>
-                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: 4, display: 'flex', justifyContent: 'space-between' }}>
-                            <span>{label}</span>
-                            {winner === type && <span style={{ color: '#10b981', fontWeight: 800 }}>SELECTED</span>}
-                        </div>
-                        <div style={{ fontSize: '1.2rem', fontWeight: 700, color: score > 75 ? '#10b981' : score > 50 ? '#f59e0b' : '#ef4444' }}>
-                            {score ?? 0}%
-                        </div>
-                    </div>
-                ))}
+            {fileError && <Alert tone="danger" className="mb-4">{fileError}</Alert>}
+
+            <div className={cn('mb-4 grid gap-3', compact ? 'grid-cols-1' : 'grid-cols-2')}>
+                <ScoreCard label="Gen AI" score={result.genaiScore} selected={winner === 'genai'} />
+                <ScoreCard label="Backend" score={result.backendScore} selected={winner === 'backend'} />
             </div>
 
             {result.addedKeywords?.length > 0 && (
-                <div style={{ marginBottom: 8 }}>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 4 }}>➕ Keywords added</div>
-                    {result.addedKeywords.map((k, i) => <span key={i} style={chip('rgba(16,185,129,0.12)', '#34d399')}>{k}</span>)}
+                <div className="mb-3">
+                    <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-muted">
+                        <Plus className="size-3.5 text-success" aria-hidden="true" />
+                        Keywords added
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                        {result.addedKeywords.map((k, i) => <Chip key={i} tone="add">{k}</Chip>)}
+                    </div>
                 </div>
             )}
+
             {result.removedKeywords?.length > 0 && (
-                <div style={{ marginBottom: 8 }}>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 4 }}>➖ Removed</div>
-                    {result.removedKeywords.map((k, i) => <span key={i} style={chip('rgba(239,68,68,0.12)', '#f87171')}>{k}</span>)}
+                <div className="mb-3">
+                    <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-muted">
+                        <Minus className="size-3.5 text-danger" aria-hidden="true" />
+                        Removed
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                        {result.removedKeywords.map((k, i) => <Chip key={i} tone="remove">{k}</Chip>)}
+                    </div>
                 </div>
             )}
+
             {result.atsTips?.length > 0 && (
                 <div>
-                    <div style={{ fontSize: '0.75rem', fontWeight: 700, color: 'var(--text-secondary)', marginBottom: 4 }}>💡 ATS Tips</div>
-                    <ul style={{ margin: 0, paddingLeft: 18, fontSize: '0.82rem', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4 }}>
-                        {result.atsTips.slice(0, 5).map((t, i) => <li key={i}>{t}</li>)}
+                    <p className="mb-2 flex items-center gap-1.5 text-xs font-bold text-muted">
+                        <Lightbulb className="size-3.5 text-warning" aria-hidden="true" />
+                        ATS tips
+                    </p>
+                    <ul className="space-y-1.5">
+                        {result.atsTips.slice(0, 5).map((t, i) => (
+                            <li key={i} className="flex gap-2 text-sm text-muted">
+                                <span className="mt-2 size-1 shrink-0 rounded-full bg-subtle" aria-hidden="true" />
+                                {t}
+                            </li>
+                        ))}
                     </ul>
                 </div>
             )}
-        </div>
+        </Card>
     );
 }

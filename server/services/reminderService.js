@@ -1,36 +1,35 @@
 import cron from 'node-cron';
-import nodemailer from 'nodemailer';
-import Groq from "groq-sdk";
 import fs from 'fs';
 import JobRequest from '../models/JobRequest.js';
-import UserProfile from '../models/UserProfile.js';
+import { chatText } from './llm.js';
+import { getTransporterFor, senderIdentity, sendToRecipients, loadProfileForSending } from './mailer.js';
+import { claimDueJobs } from './jobClaim.js';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const FOLLOW_UP_CRON = process.env.FOLLOW_UP_CRON || '0 * * * *'; // hourly
+const MAX_PER_TICK = 25;
 
 /**
  * Follow-Up Reminder Service
  * Scans for job requests where follow-up is due and sends an automated nudge.
  */
 export function initReminderService() {
-    console.log('⏰ Follow-Up Reminder Service Initialized');
+    console.log(`⏰ Follow-Up Reminder Service initialised (schedule: ${FOLLOW_UP_CRON})`);
 
-    // Run every minute (for testing, should be '0 * * * *' in production)
-    cron.schedule('* * * * *', async () => {
-        console.log('[Reminder Service] Checking for due follow-ups...');
-        const now = new Date();
-
+    cron.schedule(FOLLOW_UP_CRON, async () => {
         try {
-            const dueFollowUps = await JobRequest.find({
-                followUpStatus: 'pending',
-                followUpDate: { $lte: now }
+            // Claim atomically: with more than one replica, an unclaimed find()
+            // would have every instance sending the same follow-up.
+            const dueFollowUps = await claimDueJobs({
+                model: JobRequest,
+                filter: { followUpStatus: 'pending', followUpDate: { $lte: new Date() } },
+                claimField: 'followUpClaimedAt',
+                limit: MAX_PER_TICK,
             });
 
-            if (dueFollowUps.length > 0) {
-                console.log(`[Reminder Service] Found ${dueFollowUps.length} follow-ups due. Sending automated nudges...`);
-
-                for (const job of dueFollowUps) {
-                    await sendAutomatedFollowUp(job);
-                }
+            if (!dueFollowUps.length) return;
+            console.log(`[Reminder Service] ${dueFollowUps.length} follow-up(s) due.`);
+            for (const job of dueFollowUps) {
+                await sendAutomatedFollowUp(job);
             }
         } catch (err) {
             console.error('[Reminder Service] Error during scan:', err.message);
@@ -39,28 +38,33 @@ export function initReminderService() {
 }
 
 /**
+ * Record a terminal failure. Kept separate because the old code assigned a status
+ * outside the schema enum, so this save() threw *inside* the error handler and the
+ * record stayed `pending` — meaning a permanently failing follow-up retried forever.
+ */
+async function markFailed(job, reason) {
+    try {
+        job.followUpStatus = 'failed';
+        job.followUpError = String(reason || '').slice(0, 500);
+        await job.save();
+    } catch (err) {
+        console.error(`[Reminder Service] Could not mark job ${job._id} failed:`, err.message);
+    }
+}
+
+/**
  * Generates and sends an automated follow-up email
  */
 async function sendAutomatedFollowUp(job) {
     try {
-        const profile = await UserProfile.findOne({ email: job.userEmail });
+        const profile = await loadProfileForSending(job.userEmail);
         if (!profile) {
-            console.error(`[Reminder Service] No profile found for ${job.userEmail}. Skipping follow-up.`);
-            job.followUpStatus = 'failed';
-            await job.save();
+            await markFailed(job, `No profile found for ${job.userEmail}.`);
             return;
         }
 
-        const gmailUser = process.env.GMAIL_USER;
-        const gmailPass = process.env.GMAIL_APP_PASSWORD;
-
-        if (!gmailUser || !gmailPass) {
-            console.error('[Reminder Service] Gmail credentials not configured. Skipping follow-up.');
-            return;
-        }
-
-        // 1. Generate Follow-Up Content using Groq
-        const systemPrompt = "You are a professional career coach. Write a very short, friendly, and respectful follow-up 'nudge' email.";
+        // 1. Generate the nudge
+        const systemPrompt = "You write short, friendly, respectful follow-up nudges. You never guilt the recipient or imply they owe a reply.";
         const userPrompt = `Context:
 - Recipient: Hiring Team at ${job.companyName}
 - Original Role: ${job.jobTitle}
@@ -80,20 +84,24 @@ Rules:
 - No placeholders like [Name]. Use "Hi there" or "Dear Team".
 - Mention that the resume is still attached (and/or provide the resume link: ${profile.resumeLink || 'N/A'}) for convenience.`;
 
-        const res = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-            max_tokens: 300,
+        const followUpBody = await chatText({
+            system: systemPrompt,
+            user: userPrompt,
+            maxTokens: 300,
+            temperature: 0.6,
+            label: 'follow-up',
         });
 
-        const followUpBody = res.choices[0].message.content.trim();
+        if (!followUpBody) {
+            await markFailed(job, 'Model returned an empty follow-up body.');
+            return;
+        }
+
         const followUpSubject = `Follow-up: ${job.generatedEmailSubject}`;
 
-        // 2. Prepare Mailer
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: gmailUser, pass: gmailPass },
-        });
+        // 2. Prepare the mailer (per-user OAuth where configured, shared SMTP otherwise)
+        const transporter = await getTransporterFor(profile);
+        const from = senderIdentity(profile, job.userEmail);
 
         const attachments = [];
         if (profile.resumePath && fs.existsSync(profile.resumePath)) {
@@ -104,26 +112,28 @@ Rules:
         }
 
         // 3. Send to all original recipients
-        for (const recipientEmail of job.sentTo) {
-            await transporter.sendMail({
-                from: `"${profile.name || job.userEmail}" <${gmailUser}>`,
-                to: recipientEmail,
-                subject: followUpSubject,
-                text: followUpBody,
-                html: `<div style="font-family:sans-serif;white-space:pre-wrap;line-height:1.6;color:#333;">${followUpBody}</div>`,
-                attachments,
-            });
+        const { sentTo, errors } = await sendToRecipients({
+            transporter,
+            from,
+            recipients: (job.sentTo || []).map((email) => ({ email })),
+            subject: followUpSubject,
+            body: followUpBody,
+            attachments,
+        });
+
+        // 4. Update the record
+        if (!sentTo.length) {
+            await markFailed(job, errors[0]?.error || 'All follow-up sends failed.');
+            return;
         }
 
-        // 4. Update Job Record
         job.followUpStatus = 'sent';
+        job.followUpSentAt = new Date();
         await job.save();
 
-        console.log(`[Reminder Service] ✅ Automated follow-up sent for "${job.jobTitle}" at ${job.companyName} to ${job.sentTo.length} recipients.`);
-
+        console.log(`[Reminder Service] ✅ Follow-up sent for "${job.jobTitle}" at ${job.companyName} to ${sentTo.length}/${job.sentTo.length} recipient(s).`);
     } catch (err) {
-        console.error(`[Reminder Service] ❌ Failed to send follow-up for ${job.jobTitle}:`, err.message);
-        job.followUpStatus = 'failed';
-        await job.save();
+        console.error(`[Reminder Service] ❌ Follow-up failed for ${job.jobTitle}:`, err.message);
+        await markFailed(job, err.message);
     }
 }

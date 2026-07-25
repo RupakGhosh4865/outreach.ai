@@ -1,39 +1,125 @@
 'use client';
+
 import { useState, useEffect, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import {
+    ArrowLeft, ArrowRight, Bot, Briefcase, CalendarClock, Check, ChevronRight,
+    Contact, FileText, Gauge, Handshake, Link2, Mail, MailPlus, Search, Send,
+    Sparkles, UserSearch, Users, Zap,
+} from 'lucide-react';
 import AuthGuard from '../components/AuthGuard';
 import ResumeOptimizerPanel from '../components/ResumeOptimizerPanel';
 import UkJobFinder from '../components/UkJobFinder';
+import JobSources from '../components/JobSources';
+import JobRadar from '../components/JobRadar';
+import ApplicationPipeline from '../components/ApplicationPipeline';
+import {
+    Alert, Badge, Button, Card, CardTitle, Field, Input, Textarea, cn,
+} from '../components/ui';
+import { useToast } from '../components/ui/Toast';
+import { apiGet, apiPost, ApiError } from '@/lib/api';
 
-const API = 'http://localhost:5000';
+const STEPS = ['Job details', 'Recipients', 'Email & send'];
 
-function Toast({ toasts }) {
+const EMAIL_TYPES = [
+    { value: 'referral', icon: Handshake, label: 'Referral request', desc: 'Ask someone to refer you' },
+    { value: 'direct_apply', icon: MailPlus, label: 'Direct apply', desc: 'Apply straight to an employee' },
+    { value: 'vacancy_inquiry', icon: Search, label: 'Vacancy inquiry', desc: 'Ask if roles are open' },
+];
+
+/** The eight stages the autopilot reports while it works. */
+const AUTOPILOT_STAGES = [
+    { icon: Search, title: 'Reading the job post', desc: 'Fetching the posting and its requirements.' },
+    { icon: Bot, title: 'Analysing your profile', desc: 'Matching your stack against the role.' },
+    { icon: Link2, title: 'Finding the company', desc: 'Resolving the domain and structure.' },
+    { icon: Users, title: 'Targeting people', desc: 'Identifying hiring managers and decision makers.' },
+    { icon: FileText, title: 'Optimising your CV', desc: 'Rewriting and scoring it against this job description.' },
+    { icon: Sparkles, title: 'Writing the emails', desc: 'Drafting personalised outreach copy.' },
+    { icon: Gauge, title: 'Selecting the best CV', desc: 'Picking the highest ATS match for this role.' },
+    { icon: Check, title: 'Ready', desc: 'Everything is prepared for your review.' },
+];
+
+/* The old list included a "2 Min (Test)" option mapping to days: -1, a test hook
+   the server no longer honours. Offering it would schedule a follow-up that
+   never fires. */
+const FOLLOW_UP_OPTIONS = [
+    { label: 'None', days: 0 },
+    { label: '3 days', days: 3 },
+    { label: '5 days', days: 5 },
+    { label: '7 days', days: 7 },
+];
+
+/**
+ * Progress through the wizard. Communicates position with shape and text as
+ * well as colour, and announces the current step to screen readers.
+ */
+function Stepper({ step }) {
     return (
-        <div className="toast-container">
-            {toasts.map(t => (
-                <div key={t.id} className={`toast toast-${t.type}`}>
-                    {t.type === 'success' ? '✅' : t.type === 'error' ? '❌' : 'ℹ'} {t.message}
-                </div>
-            ))}
-        </div>
+        <nav aria-label="Progress" className="mb-8">
+            <ol className="flex items-center gap-2 sm:gap-3">
+                {STEPS.map((label, i) => {
+                    const done = step > i;
+                    const active = step === i;
+                    return (
+                        <li key={label} className={cn('flex items-center gap-2 sm:gap-3', i < STEPS.length - 1 && 'flex-1')}>
+                            <span className="flex items-center gap-2.5" aria-current={active ? 'step' : undefined}>
+                                <span
+                                    className={cn(
+                                        'grid size-8 shrink-0 place-items-center rounded-full text-sm font-bold transition-colors duration-200',
+                                        done && 'bg-brand text-brand-ink',
+                                        active && 'bg-brand/15 text-brand ring-2 ring-brand',
+                                        !done && !active && 'bg-white/5 text-subtle ring-1 ring-white/10',
+                                    )}
+                                >
+                                    {done ? <Check className="size-4" aria-hidden="true" /> : i + 1}
+                                </span>
+                                <span className={cn('hidden text-sm font-semibold sm:inline', active ? 'text-text' : 'text-subtle')}>
+                                    {label}
+                                </span>
+                            </span>
+                            {i < STEPS.length - 1 && (
+                                <span
+                                    aria-hidden="true"
+                                    className={cn('h-px flex-1 transition-colors duration-300', done ? 'bg-brand' : 'bg-white/10')}
+                                />
+                            )}
+                        </li>
+                    );
+                })}
+            </ol>
+            <p className="sr-only">Step {step + 1} of {STEPS.length}: {STEPS[step]}</p>
+        </nav>
     );
 }
 
-function Stepper({ step }) {
-    const steps = ['Job Details', 'Find Employees', 'Email & Send'];
+/** Recipient row with a large, obviously-tappable hit area. */
+function RecipientRow({ emp, selected, onToggle }) {
+    const name = `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.email;
     return (
-        <div className="stepper">
-            {steps.map((s, i) => (
-                <div key={i} className="step-item" style={{ flex: i < steps.length - 1 ? 1 : 'none' }}>
-                    <div className={`step-circle ${step === i ? 'active' : step > i ? 'done' : ''}`}>
-                        {step > i ? '✓' : i + 1}
-                    </div>
-                    <span className={`step-label ${step === i ? 'active' : ''}`}>{s}</span>
-                    {i < steps.length - 1 && <div className={`step-line ${step > i ? 'done' : ''}`} />}
-                </div>
-            ))}
-        </div>
+        <li>
+            <label
+                className={cn(
+                    'tap flex cursor-pointer items-center gap-3 rounded-xl border p-3 transition-colors duration-150',
+                    selected ? 'border-brand/40 bg-brand/8' : 'border-white/8 bg-white/2 hover:border-white/20',
+                )}
+            >
+                <input
+                    type="checkbox"
+                    checked={selected}
+                    onChange={() => onToggle(emp.email)}
+                    className="size-4 shrink-0 accent-[var(--color-brand)]"
+                />
+                <span className="grid size-9 shrink-0 place-items-center rounded-full bg-brand/12 text-xs font-bold uppercase text-brand">
+                    {emp.firstName?.[0] || emp.email[0] || '?'}
+                </span>
+                <span className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-semibold">{name}</span>
+                    <span className="block truncate text-xs text-subtle">{emp.email}</span>
+                </span>
+                {emp.position && <span className="hidden shrink-0 text-xs text-subtle sm:block">{emp.position}</span>}
+            </label>
+        </li>
     );
 }
 
@@ -41,9 +127,14 @@ export default function OutreachPage() {
     const router = useRouter();
     const [step, setStep] = useState(0);
     const [userEmail, setUserEmail] = useState('');
-    const [toasts, setToasts] = useState([]);
-    const [loading, setLoading] = useState(false);
+    // Toasts come from the app-level provider so they render in one aria-live
+    // region and are dismissible, rather than a per-page copy of the mechanism.
+    const { toast: addToast } = useToast();
     const [isExtension, setIsExtension] = useState(false);
+    // Bumped whenever an application is created or changes state, so the
+    // pipeline panel reloads without waiting for its poll tick.
+    const [pipelineKey, setPipelineKey] = useState(0);
+    const refreshPipeline = () => setPipelineKey((k) => k + 1);
 
     // Step 1 state
     const [emailType, setEmailType] = useState('referral');
@@ -102,12 +193,6 @@ export default function OutreachPage() {
     const [applyTiming, setApplyTiming] = useState('now'); // 'now' | 'schedule'
     const [scheduledAt, setScheduledAt] = useState('');
 
-    const addToast = (message, type = 'info') => {
-        const id = Date.now();
-        setToasts(t => [...t, { id, message, type }]);
-        setTimeout(() => setToasts(t => t.filter(x => x.id !== id)), 5000);
-    };
-
     useEffect(() => {
         const saved = localStorage.getItem('jobreach_email');
         if (saved) setUserEmail(saved);
@@ -139,7 +224,7 @@ export default function OutreachPage() {
                 if (title) setJobTitle(title);
                 if (company) setCompanyName(company);
                 
-                addToast('⚡ Job details imported from Extension!', 'success');
+                addToast('Job details imported from Extension!', 'success');
             }
         };
 
@@ -152,11 +237,7 @@ export default function OutreachPage() {
     async function fetchHistoryContacts(name) {
         if (!name) return;
         try {
-            const token = localStorage.getItem('authToken');
-            const res = await fetch(`${API}/api/jobs/company-contacts?companyName=${encodeURIComponent(name)}`, {
-                headers: { 'Authorization': `Bearer ${token}` }
-            });
-            const data = await res.json();
+            const data = await apiGet(`/api/jobs/company-contacts?companyName=${encodeURIComponent(name)}`);
             setHistoryContacts(data.contacts || []);
         } catch (err) {
             console.error('History fetch error:', err);
@@ -178,35 +259,23 @@ export default function OutreachPage() {
         }
         setScraping(true);
         try {
-            const token = localStorage.getItem('authToken');
-            const res = await fetch(`${API}/api/jobs/extract-from-url`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({ url: linkedinUrl }),
-            });
-            const data = await res.json();
-            if (res.ok) {
-                if (data.companyName) setCompanyName(data.companyName);
-                if (data.jobTitle) setJobTitle(data.jobTitle);
-                if (data.jobDescription) {
-                    setJobDescription(data.jobDescription);
-                    analyzeJobFit(data.jobDescription); // Trigger analysis automatically
-                }
-                if (data.postEmails?.length) {
-                    setPostEmails(data.postEmails);
-                    addToast(`✨ Job details extracted! Found ${data.postEmails.length} email(s) in post.`, 'success');
-                } else {
-                    addToast('✨ Job details extracted!', 'success');
-                }
-                if (data.companyName) fetchHistoryContacts(data.companyName);
-            } else {
-                addToast(data.message || 'Extraction failed.', 'error');
+            const data = await apiPost('/api/jobs/extract-from-url', { url: linkedinUrl });
+
+            if (data.companyName) setCompanyName(data.companyName);
+            if (data.jobTitle) setJobTitle(data.jobTitle);
+            if (data.jobDescription) {
+                setJobDescription(data.jobDescription);
+                analyzeJobFit(data.jobDescription); // Trigger analysis automatically
             }
+            if (data.postEmails?.length) {
+                setPostEmails(data.postEmails);
+                addToast(`Job details extracted! Found ${data.postEmails.length} email(s) in post.`, 'success');
+            } else {
+                addToast('Job details extracted!', 'success');
+            }
+            if (data.companyName) fetchHistoryContacts(data.companyName);
         } catch (e) {
-            addToast('Connection error during extraction.', 'error');
+            addToast(e.message || 'Connection error during extraction.', 'error');
         }
         setScraping(false);
     }
@@ -218,14 +287,8 @@ export default function OutreachPage() {
         if (optimizePollRef.current) clearInterval(optimizePollRef.current);
 
         try {
-            const token = localStorage.getItem('authToken');
-            const res = await fetch(`${API}/api/jobs/optimize-resume`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-                body: JSON.stringify({ jobDescription: jd }),
-            });
-            const data = await res.json();
-            if (!res.ok) { setOptimizeState({ status: 'failed' }); return; }
+            const data = await apiPost('/api/jobs/optimize-resume', { jobDescription: jd });
+
             if (data.status === 'done') {
                 setOptimizeState({ key: data.key, status: 'done', result: data.result });
                 return;
@@ -236,12 +299,11 @@ export default function OutreachPage() {
             optimizePollRef.current = setInterval(async () => {
                 polls += 1;
                 try {
-                    const sr = await fetch(`${API}/api/jobs/optimize-resume/status?key=${data.key}`);
-                    const sd = await sr.json();
+                    const sd = await apiGet(`/api/jobs/optimize-resume/status?key=${data.key}`);
                     if (sd.status === 'done') {
                         clearInterval(optimizePollRef.current);
                         setOptimizeState({ key: data.key, status: 'done', result: sd.result });
-                        addToast('✨ Dynamic CV ready for this job!', 'success');
+                        addToast('Dynamic CV ready for this job!', 'success');
                     } else if (sd.status === 'failed' || polls > 24) {
                         clearInterval(optimizePollRef.current);
                         setOptimizeState({ key: data.key, status: 'failed' });
@@ -270,13 +332,8 @@ export default function OutreachPage() {
         if (!textToAnalyze) return;
         setAnalyzingFit(true);
         try {
-            const res = await fetch(`${API}/api/jobs/analyze-fit`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ jobDescription: textToAnalyze, userEmail }),
-            });
-            const data = await res.json();
-            if (res.ok && data.scores) {
+            const data = await apiPost('/api/jobs/analyze-fit', { jobDescription: textToAnalyze });
+            if (data.scores) {
                 setFitResults(data);
                 addToast('ATS Scan complete!', 'success');
             }
@@ -291,24 +348,11 @@ export default function OutreachPage() {
         setProfileScraping(true);
         setScrapedContact(null);
         try {
-            const token = localStorage.getItem('authToken');
-            const res = await fetch(`${API}/api/jobs/scrape-profile`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({ url: profileUrl }),
-            });
-            const data = await res.json();
-            if (res.ok) {
-                setScrapedContact(data);
-                addToast('✨ Profile details extracted!', 'success');
-            } else {
-                addToast(data.message || 'Scraping failed.', 'error');
-            }
+            const data = await apiPost('/api/jobs/scrape-profile', { url: profileUrl });
+            setScrapedContact(data);
+            addToast('Profile details extracted!', 'success');
         } catch (e) {
-            addToast('Connection error during profile scraping.', 'error');
+            addToast(e.message || 'Connection error during profile scraping.', 'error');
         }
         setProfileScraping(false);
     }
@@ -352,16 +396,7 @@ export default function OutreachPage() {
     async function handleFindEmployees() {
         setFindingEmps(true);
         try {
-            const token = localStorage.getItem('authToken');
-            const res = await fetch(`${API}/api/jobs/find-employees`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({ companyName, companyDomain }),
-            });
-            const data = await res.json();
+            const data = await apiPost('/api/jobs/find-employees', { companyName, companyDomain });
             // Merge: post emails first, then Hunter.io (deduplicated)
             const postEmpList = postEmails.map(email => ({
                 firstName: 'Hiring', lastName: 'Manager', email,
@@ -401,20 +436,11 @@ export default function OutreachPage() {
         setGenerating(true);
         try {
             const firstEmp = employees.find(e => selectedEmps.includes(e.email));
-            const token = localStorage.getItem('authToken');
-            const res = await fetch(`${API}/api/jobs/generate-email`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    userEmail, emailType, jobTitle, companyName,
-                    jobDescription, extraContext,
-                    recipientName: firstEmp ? `${firstEmp.firstName} ${firstEmp.lastName}`.trim() : '',
-                }),
+            const data = await apiPost('/api/jobs/generate-email', {
+                emailType, jobTitle, companyName,
+                jobDescription, extraContext,
+                recipientName: firstEmp ? `${firstEmp.firstName} ${firstEmp.lastName}`.trim() : '',
             });
-            const data = await res.json();
             if (data.variants && data.variants.length > 0) {
                 setVariants(data.variants);
                 // Automatically select the first (and only) variant
@@ -422,7 +448,7 @@ export default function OutreachPage() {
                 setSelectedVariant(0);
                 setEmailSubject(first.subject);
                 setEmailBody(first.body);
-                addToast('✨ Email generated by Gemini AI!', 'success');
+                addToast('Email generated by Gemini AI!', 'success');
             }
             else {
                 addToast('Generation failed: ' + (data.message || 'Unknown error'), 'error');
@@ -452,39 +478,29 @@ export default function OutreachPage() {
         setSending(true);
         setResumeOptimizing(true);
         try {
-            const token = localStorage.getItem('authToken');
-            const res = await fetch(`${API}/api/jobs/send`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    userEmail, recipients, subject: emailSubject, body: emailBody,
-                    linkedinUrl, companyName, jobTitle, jobDescription, emailType, extraContext,
-                    manualEmail, manualPhone, employees, followUpDays,
-                    scheduledAt: applyTiming === 'schedule' ? scheduledAt : null,
-                }),
+            const data = await apiPost('/api/jobs/send', {
+                recipients, subject: emailSubject, body: emailBody,
+                linkedinUrl, companyName, jobTitle, jobDescription, emailType, extraContext,
+                manualEmail, manualPhone, employees, followUpDays,
+                scheduledAt: applyTiming === 'schedule' ? scheduledAt : null,
             });
-            const data = await res.json();
             setResumeOptimizing(false);
-            if (res.ok) {
-                if (data.optimizedResumeUsed) {
-                    setOptimizedResumeInfo({ selectedResume: data.optimizedResumeUsed, matchScore: data.optimizedMatchScore });
-                }
-                if (data.scheduled) {
-                    addToast(`📅 ${data.message}`, 'success');
-                    setTimeout(() => router.push('/history'), 2500);
-                } else {
-                    addToast(`🎉 ${data.message}`, 'success');
-                    setTimeout(() => router.push('/history'), 2000);
-                }
-            } else {
-                addToast(data.message || 'Failed to send emails.', 'error');
+
+            if (data.optimizedResumeUsed) {
+                setOptimizedResumeInfo({ selectedResume: data.optimizedResumeUsed, matchScore: data.optimizedMatchScore });
             }
-        } catch {
+            if (data.resumeError) {
+                addToast(`Resume optimisation failed: ${data.resumeError}`, 'error');
+            }
+            if (data.attachmentStatus === 'missing') {
+                addToast('No resume was attached — upload one on your profile.', 'error');
+            }
+            addToast(data.message, 'success');
+            setTimeout(() => router.push('/history'), data.scheduled ? 2500 : 3000);
+        } catch (err) {
             setResumeOptimizing(false);
-            addToast('Send failed. Check server & Gmail credentials in .env', 'error');
+            console.error('Send failed:', err);
+            addToast(err.message || 'Failed to send emails.', 'error');
         }
         setSending(false);
     }
@@ -502,47 +518,29 @@ export default function OutreachPage() {
         setAutoStep(1);
         setLimitReached(false);
 
+        // The request genuinely takes a while (scrape → LLM → Hunter → CV → one
+        // email per contact), so the stepper advances on a timer to show progress.
+        // It used to *await* those timers, adding ~6.3s of pure delay to every run.
+        const stepTimers = [
+            setTimeout(() => setAutoStep(2), 800),
+            setTimeout(() => setAutoStep(3), 2000),
+            setTimeout(() => setAutoStep(4), 4000),
+            setTimeout(() => setAutoStep(5), 7000),
+            setTimeout(() => setAutoStep(6), 11000),
+            setTimeout(() => setAutoStep(7), 16000),
+        ];
+        const clearStepTimers = () => stepTimers.forEach(clearTimeout);
+
         try {
-            // Simulated progress for better UX
-            const delay = (ms) => new Promise(res => setTimeout(res, ms));
-
-            setAutoStep(1); await delay(800); // Analyzing Input
-            setAutoStep(2); await delay(1000); // Extracting Job
-
-            const token = localStorage.getItem('authToken');
-            const payload = { 
-                url: isUrl ? linkedinUrl : undefined, 
+            const data = await apiPost('/api/jobs/autopilot', {
+                url: isUrl ? linkedinUrl : undefined,
                 jobText: !isUrl ? effectiveJobText : undefined,
-                userEmail, 
-                emailType, 
-                extraContext 
-            };
-
-            const res = await fetch(`${API}/api/jobs/autopilot`, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${token}`
-                },
-                body: JSON.stringify(payload),
+                emailType,
+                extraContext,
             });
 
-            if (res.status === 403) {
-                setLimitReached(true);
-                setAutopilot(false);
-                addToast('Monthly limit reached! Please upgrade.', 'warning');
-                return;
-            }
-
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.message || 'Autopilot failed');
-
-            setAutoStep(3); await delay(800); // Finding domain
-            setAutoStep(4); await delay(1200); // Discovering employees
-            setAutoStep(5); await delay(1000); // Optimizing resume
-            setAutoStep(6); await delay(1500); // Generating emails
-            setAutoStep(7); await delay(600);  // Finalizing
-            setAutoStep(8); await delay(400);  // Ready!
+            clearStepTimers();
+            setAutoStep(8); // Ready
 
             // Capture optimized resume info if returned
             if (data.optimizedResumeUsed) {
@@ -572,7 +570,14 @@ export default function OutreachPage() {
             }
 
         } catch (err) {
-            addToast(err.message, 'error');
+            clearStepTimers();
+            // 403 is the plan limit, which has its own upgrade prompt.
+            if (err instanceof ApiError && err.status === 403) {
+                setLimitReached(true);
+                addToast('Monthly limit reached — upgrade to keep going.', 'error');
+            } else {
+                addToast(err.message || 'Autopilot failed.', 'error');
+            }
             setAutopilot(false);
         }
     }
@@ -584,805 +589,623 @@ export default function OutreachPage() {
 
     return (
         <AuthGuard>
-            <main className="page" style={isExtension ? { paddingTop: 20 } : {}}>
-                <div className="container" style={isExtension ? { maxWidth: '100%', padding: '0 12px' } : { maxWidth: 780 }}>
-                    {!isExtension && (
-                        <div className="page-header">
-                            <h1>New Job Outreach</h1>
-                            <p>3 steps to send personalized emails automatically</p>
-                        </div>
-                    )}
+            <div className={cn('pb-24', isExtension ? 'px-3 pt-5' : 'shell-narrow page-top')}>
+                {!isExtension && (
+                    <header className="animate-fade-up mb-8">
+                        <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">New outreach</h1>
+                        <p className="mt-2 text-muted">
+                            Three steps from a job link to a personalised email in someone&apos;s inbox.
+                        </p>
+                    </header>
+                )}
 
-                    {
-                        !userEmail && (
-                            <div className="alert alert-warning" style={{ marginBottom: 24 }}>
-                                ⚠ No profile found. <Link href="/profile" style={{ color: 'var(--accent)' }}>Set up your profile first →</Link>
-                            </div>
-                        )
-                    }
+                {!userEmail && (
+                    <Alert tone="warning" className="mb-6">
+                        No profile found.{' '}
+                        <Link href="/profile" className="font-semibold underline underline-offset-2">
+                            Set up your profile first
+                        </Link>{' '}
+                        so we can personalise your emails.
+                    </Alert>
+                )}
 
-                    <Stepper step={step} />
+                <Stepper step={step} />
 
-                    {/* ─── STEP 1: Job Details ─────────────────────────────────────────── */}
-                    {
-                        step === 0 && (
-                            <div className="card">
-                                <div className="card-title"><span className="icon">💼</span> Job Details</div>
+                {/* ══ STEP 1 — Job details ══════════════════════════════════════ */}
+                {step === 0 && (
+                    <div className="space-y-5">
+                        {/* Autopilot */}
+                        <Card>
+                            <CardTitle
+                                icon={Zap}
+                                title="One-click autopilot"
+                                description="Scrapes the post, finds contacts, and writes the emails in one go."
+                                action={<Badge tone="brand">Fastest</Badge>}
+                            />
 
-                                {/* Email Type Selector */}
-                                <div className="form-group">
-                                    <label>What kind of email?</label>
-                                    <div className="radio-group">
-                                        {[
-                                            { value: 'referral', icon: '🤝', label: 'Referral Request', desc: 'Ask someone to refer you' },
-                                            { value: 'direct_apply', icon: '📨', label: 'Direct Apply', desc: 'Apply directly to employee' },
-                                            { value: 'vacancy_inquiry', icon: '🔍', label: 'Vacancy Inquiry', desc: 'Ask if positions are open' },
-                                        ].map(opt => (
-                                            <div key={opt.value} className="radio-option">
-                                                <input
-                                                    type="radio" id={opt.value} name="emailType"
-                                                    value={opt.value} checked={emailType === opt.value}
-                                                    onChange={() => setEmailType(opt.value)}
-                                                />
-                                                <label htmlFor={opt.value}>
-                                                    <span className="radio-icon">{opt.icon}</span>
-                                                    <span className="radio-label">{opt.label}</span>
-                                                    <span className="radio-desc">{opt.desc}</span>
-                                                </label>
-                                            </div>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                {/* Unified LinkedIn Auto-Fill Field */}
-                                <div className="form-group" style={{ marginBottom: 32, padding: '28px', background: 'rgba(108, 99, 255, 0.04)', borderRadius: '20px', border: '1px solid var(--border)', position: 'relative', overflow: 'hidden' }}>
-                                    <div style={{ position: 'absolute', top: 0, left: 0, width: '4px', height: '100%', background: 'var(--gradient)' }} />
-
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                                        <label style={{ color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
-                                            🚀 One-Click Autopilot
-                                        </label>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>Recommended for speed</div>
-                                    </div>
-
-                                    <div style={{ display: 'flex', gap: 12, flexDirection: isExtension ? 'column' : 'row', marginBottom: 16 }}>
-                                        <input
-                                            type="url"
-                                            placeholder="Paste LinkedIn job URL..."
-                                            value={linkedinUrl}
-                                            onChange={e => setLinkedinUrl(e.target.value)}
-                                            style={{ flex: 1, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'white', borderRadius: 12, padding: '14px 18px', fontSize: '1rem' }}
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={() => runAutopilot('url')}
-                                            disabled={autopilot || !linkedinUrl.trim()}
-                                            className="btn btn-primary"
-                                            style={{ borderRadius: 12, padding: '0 28px', minWidth: isExtension ? '100%' : '180px', fontSize: '1rem', height: '54px' }}
-                                        >
-                                            {autopilot && autoMode === 'url' ? <div className="spinner" /> : '🚀 Start via URL'}
-                                        </button>
-                                    </div>
-
-                                    <div style={{ textAlign: 'center', color: 'var(--text-muted)', fontSize: '0.8rem', marginBottom: 16, fontWeight: 700 }}>OR</div>
-
-                                    {/* Paragraph approach */}
-                                    <div style={{ display: 'flex', gap: 12, flexDirection: isExtension ? 'column' : 'row' }}>
-                                        <textarea
-                                            placeholder="Paste full job description paragraph (include company and title if possible)..."
-                                            value={pastedJobDescription}
-                                            onChange={e => setPastedJobDescription(e.target.value)}
-                                            style={{ flex: 1, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'white', borderRadius: 12, padding: '14px 18px', fontSize: '1rem', minHeight: '80px', resize: 'vertical' }}
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={() => runAutopilot('text')}
-                                            disabled={autopilot || !pastedJobDescription.trim()}
-                                            className="btn btn-primary"
-                                            style={{ borderRadius: 12, padding: '0 28px', minWidth: isExtension ? '100%' : '180px', fontSize: '1rem', height: '80px' }}
-                                        >
-                                            {autopilot && autoMode === 'text' ? <div className="spinner" /> : '🚀 Start via Text'}
-                                        </button>
-                                    </div>
-
-                                    {autopilot && (
-                                        <div className="autopilot-flow" style={{ marginTop: 40, width: '100%' }}>
-                                            <div style={{ display: 'flex', justifyContent: 'center', marginBottom: 40 }}>
-                                                <div style={{ textAlign: 'center' }}>
-                                                    <div style={{ fontSize: '11px', fontWeight: 800, color: '#6366f1', textTransform: 'uppercase', letterSpacing: '0.2rem', marginBottom: 8 }}>AI Orchestrator v1.1</div>
-                                                    <h2 style={{ fontSize: '32px', color: 'white', fontFamily: 'var(--font-serif)' }}>
-                                                        {autoStep === 8 ? 'Successfully Orchestrated' : 'Current Processing State'}
-                                                    </h2>
-                                                </div>
-                                            </div>
-
-                                            <div className="carousel-wrapper" style={{ overflow: 'hidden', position: 'relative', width: '100%' }}>
-                                                <div className="carousel-track" style={{
-                                                    display: 'flex',
-                                                    transition: 'transform 0.5s cubic-bezier(0.4, 0, 0.2, 1)',
-                                                    transform: `translateX(calc(-${(autoStep - 1) * 100}%))`,
-                                                    willChange: 'transform'
-                                                }}>
-                                                    {[
-                                                        { icon: '🔍', title: 'Scraping', sub: 'Fetching Job Post...', desc: 'Reading job post metadata and verifying requirements...' },
-                                                        { icon: '🧠', title: 'Learning', sub: 'Analyzing Profile...', desc: 'Understanding technical stack and matching qualifications...' },
-                                                        { icon: '🌐', title: 'Sourcing', sub: 'Finding the Right People', desc: 'Verifying company domains and corporate structure...' },
-                                                        { icon: '👥', title: 'Targeting', sub: 'Targeting Decision Makers', desc: 'Identifying decision makers and hiring managers...' },
-                                                        { icon: '📎', title: 'Resume', sub: '✨ Optimizing Resume...', desc: 'AI is scoring & rewriting your resume against this exact JD...' },
-                                                        { icon: '✍️', title: 'Writing', sub: 'Crafting Your Emails', desc: 'Generating high-impact personalized outreach copy...' },
-                                                        { icon: '📊', title: 'Finalizing', sub: 'Selecting Best Resume', desc: 'Picking the highest ATS-match resume for this role...' },
-                                                        { icon: '🚀', title: 'Ready', sub: 'All Set!', desc: 'Preparing everything for your final approval...' },
-                                                    ].map((s, i) => {
-                                                        const active = autoStep === i + 1;
-                                                        const done = autoStep > i + 1;
-                                                        const pending = autoStep < i + 1;
-
-                                                        return (
-                                                            <div key={i} className={`step-card ${active ? 'active' : done ? 'done' : 'pending'}`} style={{
-                                                                minWidth: '100%',
-                                                                display: 'flex',
-                                                                justifyContent: 'center',
-                                                                padding: '0 20px',
-                                                                opacity: active ? 1 : 0.4,
-                                                                transform: active ? 'scale(1)' : 'scale(0.95)',
-                                                                transition: 'all 0.5s ease',
-                                                                flexShrink: 0
-                                                            }}>
-                                                                <div className="glass-card" style={{
-                                                                    width: '100%',
-                                                                    maxWidth: '480px',
-                                                                    padding: '48px 40px',
-                                                                    borderTop: active ? '2px solid #6366f1' : done ? '2px solid #10b981' : '1px solid rgba(255,255,255,0.08)',
-                                                                    boxShadow: active ? '0 0 32px rgba(99, 102, 241, 0.2)' : 'none',
-                                                                    filter: pending ? 'grayscale(0.3)' : 'none',
-                                                                    position: 'relative'
-                                                                }}>
-                                                                    <div className="step-header">
-                                                                        <span style={{ fontSize: '11px', fontWeight: 800, color: active ? '#6366f1' : '#94a3b8', textTransform: 'uppercase', letterSpacing: '2px', display: 'block', marginBottom: 16 }}>Step {i + 1} of 8</span>
-                                                                        <h2 style={{ fontSize: '30px', color: 'white', marginBottom: 12, fontFamily: 'var(--font-serif)' }}>{s.sub}</h2>
-                                                                        <p style={{ fontSize: '15px', color: '#94a3b8', lineHeight: 1.6, marginBottom: 32 }}>{s.desc}</p>
-                                                                    </div>
-                                                                    <div style={{ fontSize: '3rem' }}>{s.icon}</div>
-                                                                </div>
-                                                            </div>
-                                                        );
-                                                    })}
-                                                </div>
-                                            </div>
-
-                                            <div style={{ display: 'flex', justifyContent: 'center', gap: 10, marginTop: 40 }}>
-                                                {[...Array(8)].map((_, i) => (
-                                                    <div key={i} style={{
-                                                        width: autoStep === i + 1 ? 24 : 8,
-                                                        height: 8,
-                                                        borderRadius: 4,
-                                                        background: autoStep === i + 1 ? '#6366f1' : autoStep > i + 1 ? '#10b981' : 'rgba(255,255,255,0.1)',
-                                                        transition: 'all 0.3s ease'
-                                                    }} />
-                                                ))}
-                                            </div>
-                                        </div>
-                                    )}
-
-                                    {limitReached && (
-                                        <div className="alert alert-error" style={{ marginTop: 16, marginBottom: 0 }}>
-                                            <span>🚫 Monthly limit reached for Free plan. <Link href="/pricing" style={{ color: 'white', textDecoration: 'underline' }}>Upgrade to continue →</Link></span>
-                                        </div>
-                                    )}
-
-                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: 16, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                        <span>💡 Autopilot scrapes, finds emails, and writes personalized messages in one go.</span>
-                                    </div>
-                                </div>
-
-                                {/* LinkedIn Profile Contact Finder Section */}
-                                <div className="form-group" style={{
-                                    marginBottom: 32,
-                                    padding: '24px',
-                                    background: 'rgba(34, 197, 94, 0.04)',
-                                    borderRadius: '20px',
-                                    border: '1px solid rgba(34, 197, 94, 0.15)',
-                                    position: 'relative'
-                                }}>
-                                    <div style={{ position: 'absolute', top: 0, left: 0, width: '4px', height: '100%', background: '#22c55e' }} />
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-                                        <label style={{ color: '#22c55e', display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
-                                            🔍 Profile Contact Finder
-                                        </label>
-                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>Get email & mobile from profile</div>
-                                    </div>
-                                    <div style={{ display: 'flex', gap: 12, flexDirection: isExtension ? 'column' : 'row' }}>
-                                        <input
-                                            type="url"
-                                            placeholder="Paste LinkedIn Profile URL..."
-                                            value={profileUrl}
-                                            onChange={e => setProfileUrl(e.target.value)}
-                                            style={{ flex: 1, background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'white', borderRadius: 12, padding: '12px 18px', fontSize: '0.95rem' }}
-                                        />
-                                        <button
-                                            type="button"
-                                            onClick={handleProfileScrape}
-                                            disabled={profileScraping || !profileUrl.trim()}
-                                            className="btn btn-secondary"
-                                            style={{ borderRadius: 12, padding: '0 24px', whiteSpace: 'nowrap', width: isExtension ? '100%' : 'auto' }}
-                                        >
-                                            {profileScraping ? <div className="spinner" /> : 'Find Contact'}
-                                        </button>
-                                    </div>
-
-                                    {scrapedContact && (
-                                        <div style={{
-                                            marginTop: 20,
-                                            padding: '16px',
-                                            background: 'var(--bg-secondary)',
-                                            borderRadius: '12px',
-                                            border: '1px solid var(--border)',
-                                            display: 'flex',
-                                            justifyContent: 'space-between',
-                                            alignItems: 'center'
-                                        }}>
-                                            <div>
-                                                <div style={{ fontWeight: 700, fontSize: '0.95rem', marginBottom: 4 }}>
-                                                    {scrapedContact.firstName} {scrapedContact.lastName}
-                                                </div>
-                                                <div style={{ display: 'flex', gap: 16, fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
-                                                    {scrapedContact.email && (
-                                                        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                                            📧 {scrapedContact.email}
-                                                        </span>
-                                                    )}
-                                                    {scrapedContact.phone && (
-                                                        <span style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
-                                                            📱 {scrapedContact.phone}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            </div>
-                                            <button
-                                                onClick={addScrapedToRecipients}
-                                                className="btn btn-primary btn-sm"
-                                                style={{ height: '36px', borderRadius: '8px' }}
-                                            >
-                                                + Add Recipient
-                                            </button>
-                                        </div>
-                                    )}
-                                </div>
-
-
-
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-                                    <div className="form-group">
-                                        <label>Company Name *</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Google, Microsoft, etc."
-                                            value={companyName}
-                                            onChange={e => setCompanyName(e.target.value)}
-                                            required
-                                        />
-                                    </div>
-                                    <div className="form-group">
-                                        <label>Job Title *</label>
-                                        <input
-                                            type="text"
-                                            placeholder="Software Engineer"
-                                            value={jobTitle}
-                                            onChange={e => setJobTitle(e.target.value)}
-                                            required
-                                        />
-                                    </div>
-                                </div>
-
-                                <div className="form-group">
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginBottom: 4 }}>
-                                        <label style={{ marginBottom: 0 }}>Job Description / Requirements</label>
-                                        <div style={{ display: 'flex', gap: 8 }}>
-                                            <button
-                                                className="btn btn-secondary btn-sm"
-                                                onClick={() => analyzeJobFit(jobDescription)}
-                                                disabled={analyzingFit || !jobDescription.trim()}
-                                            >
-                                                {analyzingFit ? <><span className="spinner"/> Analyzing...</> : '📊 Analyze Job Fit'}
-                                            </button>
-                                            <button
-                                                className="btn btn-secondary btn-sm"
-                                                onClick={() => startResumeOptimization(jobDescription)}
-                                                disabled={optimizeState?.status === 'pending' || !jobDescription.trim()}
-                                            >
-                                                {optimizeState?.status === 'pending' ? <><span className="spinner"/> Optimizing...</> : '✨ Optimize Resume'}
-                                            </button>
-                                        </div>
-                                    </div>
-                                    <textarea
-                                        placeholder="Paste the job description here (optional but improves email quality)..."
-                                        value={jobDescription}
-                                        onChange={e => setJobDescription(e.target.value)}
-                                        style={{ minHeight: 120 }}
+                            <Field label="Job post URL" htmlFor="job-url">
+                                <div className="flex flex-col gap-3 sm:flex-row">
+                                    <Input
+                                        id="job-url"
+                                        type="url"
+                                        inputMode="url"
+                                        placeholder="https://linkedin.com/jobs/view/..."
+                                        value={linkedinUrl}
+                                        onChange={(e) => setLinkedinUrl(e.target.value)}
                                     />
+                                    <Button
+                                        type="button"
+                                        onClick={() => runAutopilot('url')}
+                                        disabled={autopilot || !linkedinUrl.trim()}
+                                        loading={autopilot && autoMode === 'url'}
+                                        className="sm:w-44"
+                                    >
+                                        {!(autopilot && autoMode === 'url') && <Zap className="size-4" aria-hidden="true" />}
+                                        Start
+                                    </Button>
                                 </div>
+                            </Field>
 
-                                {fitResults && (
-                                    <div style={{ marginBottom: 20, padding: 16, background: 'rgba(99,102,241,0.05)', borderRadius: 12, border: '1px solid rgba(99,102,241,0.2)' }}>
-                                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
-                                            <div style={{ fontSize: '0.85rem', fontWeight: 800, color: 'var(--accent)', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-                                                🧬 ATS Scan Results
-                                            </div>
-                                            <div className="badge badge-green">Recommended: {
-                                                fitResults.recommendedResume === 'genai' ? '🤖 Gen AI' : 
-                                                fitResults.recommendedResume === 'backend' ? '⚙️ Backend' : '📄 Main'
-                                            }</div>
-                                        </div>
-                                        
-                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 12, marginBottom: 16 }}>
-                                            {['main', 'genai', 'backend'].map(type => (
-                                                <div key={type} style={{ padding: 12, background: 'var(--bg-panel)', borderRadius: 8, border: '1px solid var(--border)' }}>
-                                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 4, textTransform: 'uppercase' }}>
-                                                        {type === 'genai' ? '🤖 Gen AI' : type === 'backend' ? '⚙️ Backend' : '📄 Main'}
-                                                    </div>
-                                                    <div style={{ fontSize: '1.2rem', fontWeight: 700, color: fitResults.scores?.[type] > 75 ? '#10b981' : fitResults.scores?.[type] > 50 ? '#f59e0b' : '#ef4444' }}>
-                                                        {fitResults.scores?.[type] || 0}%
-                                                    </div>
+                            <div className="my-5 flex items-center gap-3" aria-hidden="true">
+                                <span className="h-px flex-1 bg-white/8" />
+                                <span className="text-xs font-bold uppercase tracking-widest text-subtle">or</span>
+                                <span className="h-px flex-1 bg-white/8" />
+                            </div>
+
+                            <Field
+                                label="Paste the job description"
+                                htmlFor="job-text"
+                                hint="Include the company and title if you can — it improves the match."
+                            >
+                                <div className="flex flex-col gap-3 sm:flex-row">
+                                    <Textarea
+                                        id="job-text"
+                                        placeholder="Paste the full job description here..."
+                                        value={pastedJobDescription}
+                                        onChange={(e) => setPastedJobDescription(e.target.value)}
+                                        className="min-h-24"
+                                    />
+                                    <Button
+                                        type="button"
+                                        onClick={() => runAutopilot('text')}
+                                        disabled={autopilot || !pastedJobDescription.trim()}
+                                        loading={autopilot && autoMode === 'text'}
+                                        className="shrink-0 sm:w-44 sm:self-start"
+                                    >
+                                        {!(autopilot && autoMode === 'text') && <Zap className="size-4" aria-hidden="true" />}
+                                        Start
+                                    </Button>
+                                </div>
+                            </Field>
+
+                            {/* Live progress. A list of stages reads better than a
+                                carousel and stays legible on a 375px screen. */}
+                            {autopilot && (
+                                <div className="mt-6 rounded-2xl border border-white/8 bg-white/2 p-4 sm:p-5" aria-live="polite">
+                                    <div className="mb-4 flex items-center justify-between gap-3">
+                                        <p className="text-sm font-bold">
+                                            {autoStep >= 8 ? 'Ready for review' : 'Working on it…'}
+                                        </p>
+                                        <span className="text-xs font-semibold text-subtle" data-numeric>
+                                            Step {Math.min(autoStep, 8)} of 8
+                                        </span>
+                                    </div>
+
+                                    <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-white/8">
+                                        <div
+                                            className="h-full rounded-full bg-brand transition-[width] duration-500 ease-out"
+                                            style={{ width: `${(Math.min(autoStep, 8) / 8) * 100}%` }}
+                                        />
+                                    </div>
+
+                                    <ul className="space-y-2">
+                                        {AUTOPILOT_STAGES.map((s, i) => {
+                                            const done = autoStep > i + 1;
+                                            const active = autoStep === i + 1;
+                                            const Icon = s.icon;
+                                            return (
+                                                <li
+                                                    key={s.title}
+                                                    className={cn(
+                                                        'flex items-start gap-3 rounded-lg px-2 py-1.5 transition-colors duration-300',
+                                                        active && 'bg-brand/8',
+                                                        !done && !active && 'opacity-45',
+                                                    )}
+                                                >
+                                                    <span
+                                                        className={cn(
+                                                            'mt-0.5 grid size-5 shrink-0 place-items-center rounded-full',
+                                                            done && 'bg-brand text-brand-ink',
+                                                            active && 'text-brand',
+                                                            !done && !active && 'text-subtle',
+                                                        )}
+                                                    >
+                                                        {done
+                                                            ? <Check className="size-3" aria-hidden="true" />
+                                                            : <Icon className={cn('size-4', active && 'animate-pulse')} aria-hidden="true" />}
+                                                    </span>
+                                                    <span className="min-w-0">
+                                                        <span className={cn('block text-sm font-semibold', active ? 'text-text' : 'text-muted')}>
+                                                            {s.title}
+                                                        </span>
+                                                        {active && <span className="block text-xs text-subtle">{s.desc}</span>}
+                                                    </span>
+                                                </li>
+                                            );
+                                        })}
+                                    </ul>
+                                </div>
+                            )}
+
+                            {limitReached && (
+                                <Alert tone="danger" className="mt-5">
+                                    Monthly limit reached on the free plan.{' '}
+                                    <Link href="/pricing" className="font-semibold underline underline-offset-2">
+                                        Upgrade to continue
+                                    </Link>
+                                </Alert>
+                            )}
+                        </Card>
+
+                        {/* Profile contact finder */}
+                        <Card>
+                            <CardTitle
+                                icon={UserSearch}
+                                accent="success"
+                                title="Find a contact"
+                                description="Pull an email from a public LinkedIn profile."
+                            />
+                            <div className="flex flex-col gap-3 sm:flex-row">
+                                <Input
+                                    type="url"
+                                    inputMode="url"
+                                    aria-label="LinkedIn profile URL"
+                                    placeholder="https://linkedin.com/in/..."
+                                    value={profileUrl}
+                                    onChange={(e) => setProfileUrl(e.target.value)}
+                                />
+                                <Button
+                                    type="button"
+                                    variant="secondary"
+                                    onClick={handleProfileScrape}
+                                    disabled={profileScraping || !profileUrl.trim()}
+                                    loading={profileScraping}
+                                    className="shrink-0"
+                                >
+                                    Find contact
+                                </Button>
+                            </div>
+
+                            {scrapedContact && (
+                                <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-white/8 bg-white/2 p-4">
+                                    <span className="grid size-10 shrink-0 place-items-center rounded-full bg-success/12 text-success">
+                                        <Contact className="size-5" aria-hidden="true" />
+                                    </span>
+                                    <div className="min-w-0 flex-1">
+                                        <p className="truncate font-semibold">
+                                            {`${scrapedContact.firstName || ''} ${scrapedContact.lastName || ''}`.trim() || 'LinkedIn member'}
+                                        </p>
+                                        <p className="truncate text-sm text-subtle">
+                                            {scrapedContact.email || 'No public email found'}
+                                        </p>
+                                    </div>
+                                    {scrapedContact.email && (
+                                        <Button type="button" size="sm" onClick={addScrapedToRecipients}>
+                                            Add as recipient
+                                        </Button>
+                                    )}
+                                </div>
+                            )}
+                        </Card>
+
+                        {/* Feature panels */}
+                        <ResumeOptimizerPanel optimizeState={optimizeState} compact={isExtension} />
+                        <ApplicationPipeline userEmail={userEmail} isExtension={isExtension} refreshKey={pipelineKey} />
+                        <JobRadar userEmail={userEmail} isExtension={isExtension} onApplicationChange={refreshPipeline} />
+                        <JobSources userEmail={userEmail} isExtension={isExtension} onApplicationChange={refreshPipeline} />
+                        <UkJobFinder
+                            userEmail={userEmail}
+                            isExtension={isExtension}
+                            autopilotBusy={autopilot}
+                            onRunAutopilot={runAutopilot}
+                            onApplicationChange={refreshPipeline}
+                        />
+
+                        {/* Manual details */}
+                        <Card>
+                            <CardTitle icon={Briefcase} title="Job details" description="Or fill these in yourself." />
+
+                            <fieldset className="mb-6">
+                                <legend className="ui-label">What kind of email?</legend>
+                                <div className="grid gap-2 sm:grid-cols-3">
+                                    {EMAIL_TYPES.map((opt) => {
+                                        const Icon = opt.icon;
+                                        const active = emailType === opt.value;
+                                        return (
+                                            <label
+                                                key={opt.value}
+                                                className={cn(
+                                                    'tap flex cursor-pointer flex-col gap-1 rounded-xl border p-3 transition-colors duration-150',
+                                                    active ? 'border-brand/50 bg-brand/8' : 'border-white/8 bg-white/2 hover:border-white/20',
+                                                )}
+                                            >
+                                                <span className="flex items-center gap-2">
+                                                    <input
+                                                        type="radio"
+                                                        name="emailType"
+                                                        value={opt.value}
+                                                        checked={active}
+                                                        onChange={() => setEmailType(opt.value)}
+                                                        className="size-4 accent-[var(--color-brand)]"
+                                                    />
+                                                    <Icon className={cn('size-4', active ? 'text-brand' : 'text-subtle')} aria-hidden="true" />
+                                                    <span className="text-sm font-semibold">{opt.label}</span>
+                                                </span>
+                                                <span className="pl-6 text-xs text-subtle">{opt.desc}</span>
+                                            </label>
+                                        );
+                                    })}
+                                </div>
+                            </fieldset>
+
+                            <div className="grid gap-x-4 sm:grid-cols-2">
+                                <Field label="Company name" htmlFor="company" required>
+                                    <Input
+                                        id="company"
+                                        placeholder="Acme Corp"
+                                        value={companyName}
+                                        onChange={(e) => setCompanyName(e.target.value)}
+                                    />
+                                </Field>
+                                <Field label="Job title" htmlFor="title" required>
+                                    <Input
+                                        id="title"
+                                        placeholder="Backend Engineer"
+                                        value={jobTitle}
+                                        onChange={(e) => setJobTitle(e.target.value)}
+                                    />
+                                </Field>
+                            </div>
+
+                            <Field
+                                label="Job description"
+                                htmlFor="jd"
+                                hint="Optional, but it noticeably improves the email and the generated CV."
+                            >
+                                <Textarea
+                                    id="jd"
+                                    placeholder="Paste the job description..."
+                                    value={jobDescription}
+                                    onChange={(e) => setJobDescription(e.target.value)}
+                                />
+                            </Field>
+
+                            <div className="-mt-2 mb-5 flex flex-wrap gap-2">
+                                <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    onClick={() => analyzeJobFit(jobDescription)}
+                                    disabled={analyzingFit || !jobDescription.trim()}
+                                    loading={analyzingFit}
+                                >
+                                    {!analyzingFit && <Gauge className="size-3.5" aria-hidden="true" />}
+                                    Analyse job fit
+                                </Button>
+                                <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => startResumeOptimization(jobDescription)}
+                                    disabled={!jobDescription.trim()}
+                                >
+                                    <FileText className="size-3.5" aria-hidden="true" />
+                                    Build matched CV
+                                </Button>
+                            </div>
+
+                            {fitResults && (
+                                <div className="mb-5 rounded-xl border border-white/8 bg-white/2 p-4">
+                                    <div className="mb-3 flex items-center justify-between gap-3">
+                                        <p className="text-sm font-bold">ATS match</p>
+                                        <Badge tone="brand">Best: {fitResults.recommendedResume}</Badge>
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-3">
+                                        {['main', 'genai', 'backend'].map((type) => {
+                                            const score = fitResults.scores?.[type] || 0;
+                                            const tone = score > 75 ? 'text-success' : score > 50 ? 'text-warning' : 'text-danger';
+                                            return (
+                                                <div key={type} className="text-center">
+                                                    <p className={cn('text-xl font-extrabold', tone)} data-numeric>{score}%</p>
+                                                    <p className="mt-0.5 text-[0.7rem] uppercase tracking-wide text-subtle">{type}</p>
                                                 </div>
+                                            );
+                                        })}
+                                    </div>
+                                    {fitResults.advice?.length > 0 && (
+                                        <ul className="mt-4 space-y-1.5 border-t border-white/8 pt-3">
+                                            {fitResults.advice.map((adv, i) => (
+                                                <li key={i} className="flex gap-2 text-sm text-muted">
+                                                    <ChevronRight className="mt-0.5 size-3.5 shrink-0 text-brand" aria-hidden="true" />
+                                                    {adv}
+                                                </li>
                                             ))}
-                                        </div>
+                                        </ul>
+                                    )}
+                                </div>
+                            )}
 
-                                        {fitResults.advice?.length > 0 && (
-                                            <div>
-                                                <div style={{ fontSize: '0.8rem', fontWeight: 600, marginBottom: 8, color: 'var(--text-secondary)' }}>💡 Skills & Improvement Advice:</div>
-                                                <ul style={{ margin: 0, paddingLeft: 20, fontSize: '0.85rem', color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 6 }}>
-                                                    {fitResults.advice.map((adv, i) => <li key={i}>{adv}</li>)}
-                                                </ul>
-                                            </div>
+                            <Field label="Extra context" htmlFor="extra" hint="Anything worth mentioning, e.g. a mutual contact.">
+                                <Textarea
+                                    id="extra"
+                                    placeholder="I met your CTO at KubeCon..."
+                                    value={extraContext}
+                                    onChange={(e) => setExtraContext(e.target.value)}
+                                    className="min-h-20"
+                                />
+                            </Field>
+
+                            <Button type="button" onClick={goToStep2} block size="lg" disabled={!step1Valid()}>
+                                Continue to recipients
+                                <ArrowRight className="size-4" aria-hidden="true" />
+                            </Button>
+                        </Card>
+                    </div>
+                )}
+
+                {/* ══ STEP 2 — Recipients ═══════════════════════════════════════ */}
+                {step === 1 && (
+                    <Card>
+                        <CardTitle
+                            icon={Users}
+                            accent="info"
+                            title="Who should this reach?"
+                            description={companyName ? `Looking at ${companyName}` : 'Pick or add recipients.'}
+                        />
+
+                        <Button
+                            type="button"
+                            variant="secondary"
+                            onClick={handleFindEmployees}
+                            disabled={findingEmps || !companyName.trim()}
+                            loading={findingEmps}
+                            block
+                            className="mb-5"
+                        >
+                            {!findingEmps && <Search className="size-4" aria-hidden="true" />}
+                            Find contacts at {companyName || 'this company'}
+                        </Button>
+
+                        {employees.length > 0 && (
+                            <fieldset className="mb-6">
+                                <legend className="ui-label">
+                                    Recipients
+                                    <span className="ml-1 font-normal text-subtle">({selectedEmps.length} selected)</span>
+                                </legend>
+                                <ul className="space-y-2">
+                                    {employees.map((emp) => (
+                                        <RecipientRow
+                                            key={emp.email}
+                                            emp={emp}
+                                            selected={selectedEmps.includes(emp.email)}
+                                            onToggle={toggleEmployee}
+                                        />
+                                    ))}
+                                </ul>
+                            </fieldset>
+                        )}
+
+                        {historyContacts.length > 0 && (
+                            <div className="mb-6">
+                                <p className="ui-label">Previously found at this company</p>
+                                <ul className="flex flex-wrap gap-2">
+                                    {historyContacts
+                                        .filter((c) => !employees.some((e) => e.email === c.email))
+                                        .map((c) => (
+                                            <li key={c.email}>
+                                                <button
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setEmployees((prev) => [...prev, c]);
+                                                        setSelectedEmps((prev) => [...new Set([...prev, c.email])]);
+                                                    }}
+                                                    className="tap inline-flex min-h-9 items-center gap-1.5 rounded-full border border-white/12 bg-white/4 px-3 text-xs font-medium text-muted transition-colors hover:border-brand/40 hover:text-text"
+                                                >
+                                                    <span aria-hidden="true">+</span>
+                                                    {c.email}
+                                                </button>
+                                            </li>
+                                        ))}
+                                </ul>
+                            </div>
+                        )}
+
+                        <div className="grid gap-x-4 sm:grid-cols-2">
+                            <Field label="Or add an email manually" htmlFor="manual-email">
+                                <Input
+                                    id="manual-email"
+                                    type="email"
+                                    inputMode="email"
+                                    autoComplete="email"
+                                    placeholder="hiring@company.com"
+                                    value={manualEmail}
+                                    onChange={(e) => setManualEmail(e.target.value)}
+                                />
+                            </Field>
+                            <Field label="Phone (optional)" htmlFor="manual-phone">
+                                <Input
+                                    id="manual-phone"
+                                    type="tel"
+                                    inputMode="tel"
+                                    autoComplete="tel"
+                                    placeholder="+44 7700 900000"
+                                    value={manualPhone}
+                                    onChange={(e) => setManualPhone(e.target.value)}
+                                />
+                            </Field>
+                        </div>
+
+                        <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+                            <Button type="button" variant="secondary" onClick={() => setStep(0)}>
+                                <ArrowLeft className="size-4" aria-hidden="true" />
+                                Back
+                            </Button>
+                            <Button type="button" onClick={goToStep3} disabled={!step2Valid()}>
+                                Write the email
+                                <ArrowRight className="size-4" aria-hidden="true" />
+                            </Button>
+                        </div>
+                    </Card>
+                )}
+
+                {/* ══ STEP 3 — Email & send ═════════════════════════════════════ */}
+                {step === 2 && (
+                    <div className="space-y-5">
+                        <ResumeOptimizerPanel optimizeState={optimizeState} compact={isExtension} />
+
+                        <Card>
+                            <CardTitle icon={Mail} title="Your email" description="Review and edit before it goes out." />
+
+                            {generating ? (
+                                <div className="py-12 text-center" aria-live="polite">
+                                    <div className="mx-auto mb-4 size-8 animate-spin rounded-full border-2 border-brand border-t-transparent" />
+                                    <p className="font-semibold">Writing your email…</p>
+                                    <p className="mt-1 text-sm text-subtle">Usually about five seconds.</p>
+                                </div>
+                            ) : (
+                                <>
+                                    <Field label="Subject" htmlFor="subject">
+                                        <Input
+                                            id="subject"
+                                            value={emailSubject}
+                                            onChange={(e) => setEmailSubject(e.target.value)}
+                                        />
+                                    </Field>
+
+                                    <Field label="Body" htmlFor="body" hint="Edit anything that doesn't sound like you.">
+                                        <Textarea
+                                            id="body"
+                                            value={emailBody}
+                                            onChange={(e) => setEmailBody(e.target.value)}
+                                            className="min-h-72 font-mono text-[0.9rem] leading-relaxed"
+                                        />
+                                    </Field>
+
+                                    <div className="mb-6">
+                                        <p className="ui-label">
+                                            Sending to
+                                            <span className="ml-1 font-normal text-subtle">
+                                                ({allRecipients.length} recipient{allRecipients.length !== 1 ? 's' : ''})
+                                            </span>
+                                        </p>
+                                        {allRecipients.length === 0 ? (
+                                            <Alert tone="warning">No recipients selected — go back and pick at least one.</Alert>
+                                        ) : (
+                                            <ul className="flex flex-wrap gap-2">
+                                                {allRecipients.map((r) => (
+                                                    <li key={r.email}>
+                                                        <Badge tone="neutral" className="normal-case tracking-normal">
+                                                            {r.email}
+                                                        </Badge>
+                                                    </li>
+                                                ))}
+                                            </ul>
                                         )}
                                     </div>
-                                )}
 
-                                <ResumeOptimizerPanel apiBase={API} optimizeState={optimizeState} compact={isExtension} />
-
-                                <UkJobFinder
-                                    apiBase={API}
-                                    isExtension={isExtension}
-                                    autopilotBusy={autopilot}
-                                    onRunAutopilot={(job) => {
-                                        const jobText = `${job.title} at ${job.company}${job.location ? ` (${job.location})` : ''}\n\n${job.description || ''}`;
-                                        setPastedJobDescription(jobText);
-                                        if (job.description) startResumeOptimization(job.description);
-                                        runAutopilot('text', jobText);
-                                    }}
-                                />
-
-                                <div className="form-group">
-                                    <label>Extra Context (optional)</label>
-                                    <textarea
-                                        placeholder="Anything specific to mention, e.g. 'I met the CEO at a conference' or 'I have 3 years in Go'"
-                                        value={extraContext}
-                                        onChange={e => setExtraContext(e.target.value)}
-                                        style={{ minHeight: 70 }}
-                                    />
-                                </div>
-
-                                <button
-                                    className="btn btn-primary btn-full btn-lg"
-                                    onClick={goToStep2}
-                                    disabled={!step1Valid()}
-                                >
-                                    Find Employees →
-                                </button>
-                            </div>
-                        )
-                    }
-
-                    {/* ─── STEP 2: Find Employees ─────────────────────────────────────── */}
-                    {
-                        step === 1 && (
-                            <div className="card">
-                                <div className="card-title"><span className="icon">👥</span> Find Employees at {companyName}</div>
-
-                                <div className="alert alert-info" style={{ marginBottom: 20 }}>
-                                    <span>ℹ</span>
-                                    <span>We'll search Hunter.io for employees with public emails. Up to 10 will be shown.</span>
-                                </div>
-
-                                <div style={{ display: 'flex', gap: 12, marginBottom: 24 }}>
-                                    <div className="form-group" style={{ flex: 1, marginBottom: 0 }}>
-                                        <label>Company Domain (optional)</label>
-                                        <input
-                                            type="text"
-                                            placeholder="google.com (auto-detected if left blank)"
-                                            value={companyDomain}
-                                            onChange={e => setCompanyDomain(e.target.value)}
-                                        />
-                                    </div>
-                                    <div style={{ alignSelf: 'flex-end', paddingBottom: 1 }}>
-                                        <button
-                                            className="btn btn-primary"
-                                            onClick={handleFindEmployees}
-                                            disabled={findingEmps}
-                                        >
-                                            {findingEmps ? <><span className="spinner" /> Searching...</> : '🔍 Find Employees'}
-                                        </button>
-                                    </div>
-                                </div>
-
-                                {employees.length > 0 && (
-                                    <div className="form-group">
-                                        <label>Select Recipients ({selectedEmps.length} selected)</label>
-                                        <div className="employee-list">
-                                            {employees.map(emp => (
-                                                <div
-                                                    key={emp.email}
-                                                    className={`employee-item ${selectedEmps.includes(emp.email) ? 'selected' : ''}`}
-                                                    onClick={() => toggleEmployee(emp.email)}
+                                    <fieldset className="mb-6">
+                                        <legend className="ui-label">Automatic follow-up</legend>
+                                        <div className="flex flex-wrap gap-2">
+                                            {FOLLOW_UP_OPTIONS.map((opt) => (
+                                                <button
+                                                    key={opt.days}
+                                                    type="button"
+                                                    onClick={() => setFollowUpDays(opt.days)}
+                                                    aria-pressed={followUpDays === opt.days}
+                                                    className={cn(
+                                                        'tap min-h-10 rounded-lg border px-3.5 text-sm font-semibold transition-colors duration-150',
+                                                        followUpDays === opt.days
+                                                            ? 'border-brand/50 bg-brand/12 text-brand'
+                                                            : 'border-white/10 bg-white/2 text-muted hover:border-white/25',
+                                                    )}
                                                 >
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={selectedEmps.includes(emp.email)}
-                                                        onChange={() => toggleEmployee(emp.email)}
-                                                        onClick={e => e.stopPropagation()}
-                                                    />
-                                                    <div className="employee-avatar">
-                                                        {emp.source === 'post' ? '📧' : (emp.firstName?.[0] || '?').toUpperCase()}
-                                                    </div>
-                                                    <div className="employee-info">
-                                                        <div className="employee-name" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                                                            {emp.firstName} {emp.lastName}
-                                                            {emp.source === 'post' && (
-                                                                <span style={{ fontSize: '0.65rem', background: 'rgba(34,197,94,0.15)', color: '#22c55e', padding: '2px 8px', borderRadius: 20, fontWeight: 700, letterSpacing: '0.05em' }}>FROM POST</span>
-                                                            )}
-                                                        </div>
-                                                        <div className="employee-email" style={{ display: 'flex', gap: 12 }}>
-                                                            <span>📧 {emp.email}</span>
-                                                            {emp.phone && <span style={{ color: '#22c55e' }}>📱 {emp.phone}</span>}
-                                                        </div>
-                                                        {emp.position && <div className="employee-role">{emp.position}</div>}
-                                                    </div>
-                                                </div>
+                                                    {opt.label}
+                                                </button>
                                             ))}
                                         </div>
-                                    </div>
-                                )}
+                                        <p className="ui-hint">We&apos;ll send one polite nudge if nobody replies.</p>
+                                    </fieldset>
 
-                                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 16 }}>
-                                    <div className="form-group">
-                                        <label>Or Add Email Manually</label>
-                                        <input
-                                            type="email"
-                                            placeholder="direct.email@company.com"
-                                            value={manualEmail}
-                                            onChange={e => setManualEmail(e.target.value)}
-                                        />
-                                    </div>
-                                    <div className="form-group">
-                                        <label>Mobile Number (Optional)</label>
-                                        <input
-                                            type="tel"
-                                            placeholder="+1 234 567 890"
-                                            value={manualPhone}
-                                            onChange={e => setManualPhone(e.target.value)}
-                                        />
-                                    </div>
-                                </div>
-
-                                {/* History Contacts Section */}
-                                {historyContacts.length > 0 && (
-                                    <div style={{ marginBottom: 24, padding: '20px', background: 'rgba(52, 211, 153, 0.05)', borderRadius: '16px', border: '1px solid rgba(52, 211, 153, 0.15)' }}>
-                                        <div style={{ fontSize: '0.75rem', color: '#10b981', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 6 }}>
-                                            📜 Previously Found at {companyName}
-                                        </div>
-                                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(200px, 1fr))', gap: 10 }}>
-                                            {historyContacts.filter(hc => !employees.some(e => e.email === hc.email)).map((hc, i) => (
-                                                <div
-                                                    key={i}
-                                                    onClick={() => {
-                                                        if (!employees.some(e => e.email === hc.email)) {
-                                                            setEmployees(prev => [...prev, { ...hc, position: hc.position || 'Previous Contact', source: 'history' }]);
-                                                            setSelectedEmps(prev => [...prev, hc.email]);
-                                                        }
-                                                    }}
-                                                    style={{
-                                                        padding: '10px 14px',
-                                                        background: 'var(--bg-secondary)',
-                                                        border: '1px solid var(--border)',
-                                                        borderRadius: 10,
-                                                        cursor: 'pointer',
-                                                        transition: 'all 0.2s',
-                                                        fontSize: '0.85rem'
-                                                    }}
-                                                    className="history-contact-item"
-                                                >
-                                                    <div style={{ fontWeight: 600, color: 'var(--text-primary)', marginBottom: 2 }}>{hc.firstName} {hc.lastName}</div>
-                                                    <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis' }}>📧 {hc.email}</div>
-                                                    {hc.phone && <div style={{ fontSize: '0.75rem', color: '#22c55e', marginTop: 2 }}>📱 {hc.phone}</div>}
-                                                </div>
-                                            ))}
-                                            {historyContacts.every(hc => employees.some(e => e.email === hc.email)) && (
-                                                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>All known contacts are already listed.</div>
-                                            )}
-                                        </div>
-                                    </div>
-                                )}
-
-                                <div style={{ display: 'flex', gap: 12 }}>
-                                    <button className="btn btn-secondary" onClick={() => setStep(0)}>← Back</button>
-                                    <button
-                                        className="btn btn-primary"
-                                        style={{ flex: 1 }}
-                                        onClick={goToStep3}
-                                        disabled={!step2Valid()}
-                                    >
-                                        Generate Email →
-                                    </button>
-                                </div>
-                            </div>
-                        )
-                    }
-
-                    {/* ─── STEP 3: Email Variants & Send ───────────────────────────── */}
-                    {
-                        step === 2 && (
-                            <div className="card">
-                                <div className="card-title"><span className="icon">✉</span> AI Email Variants</div>
-
-                                {generating ? (
-                                    <div style={{ textAlign: 'center', padding: '48px 0' }}>
-                                        <div className="spinner" style={{ margin: '0 auto 16px', width: 40, height: 40, borderWidth: 3 }} />
-                                        <div style={{ color: 'var(--text-secondary)', fontSize: '1rem' }}>Gemini AI is writing 2 personalized email variants...</div>
-                                        <div style={{ color: 'var(--text-muted)', fontSize: '0.82rem', marginTop: 8 }}>This takes ~5 seconds</div>
-                                    </div>
-                                ) : selectedVariant === null ? (
-                                    /* ── Choose variant ── */
-                                    <>
-                                        <p style={{ color: 'var(--text-secondary)', marginBottom: 20, fontSize: '0.92rem' }}>
-                                            Gemini wrote <strong>2 email styles</strong> for you. Pick the one you like best:
-                                        </p>
-                                        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 24 }}>
-                                            {variants.map((v, i) => (
-                                                <div key={i} style={{
-                                                    background: 'var(--surface-hover)',
-                                                    border: '1px solid var(--border)',
-                                                    borderRadius: 12,
-                                                    padding: '18px 20px',
-                                                    display: 'flex', flexDirection: 'column', gap: 12,
-                                                }}>
-                                                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                                                        <span style={{
-                                                            fontSize: '0.72rem', fontWeight: 700, letterSpacing: '0.08em',
-                                                            textTransform: 'uppercase',
-                                                            color: v.style === 'formal' ? 'var(--accent)' : '#f59e0b',
-                                                            background: v.style === 'formal' ? 'rgba(108,99,255,0.15)' : 'rgba(245,158,11,0.12)',
-                                                            padding: '3px 10px', borderRadius: 20,
-                                                        }}>
-                                                            {v.style === 'formal' ? '🎩 Formal & Professional' : '⚡ Confident & Direct'}
-                                                        </span>
-                                                    </div>
-                                                    <div>
-                                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 4 }}>SUBJECT</div>
-                                                        <div style={{ fontWeight: 600, fontSize: '0.88rem', color: 'var(--text-primary)', lineHeight: 1.4 }}>{v.subject}</div>
-                                                    </div>
-                                                    <div>
-                                                        <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 4 }}>PREVIEW</div>
-                                                        <div style={{ fontSize: '0.82rem', color: 'var(--text-secondary)', lineHeight: 1.6, maxHeight: 120, overflow: 'hidden', maskImage: 'linear-gradient(to bottom, black 60%, transparent)' }}>
-                                                            {v.body}
-                                                        </div>
-                                                    </div>
-                                                    <button
-                                                        className="btn btn-primary"
-                                                        style={{ marginTop: 'auto' }}
-                                                        onClick={() => {
-                                                            setSelectedVariant(i);
-                                                            setEmailSubject(v.subject);
-                                                            setEmailBody(v.body);
-                                                        }}
+                                    <fieldset className="mb-6">
+                                        <legend className="ui-label">When to send</legend>
+                                        <div className="grid gap-2 sm:grid-cols-2">
+                                            {[
+                                                { id: 'now', label: 'Send now', desc: 'Goes out immediately', icon: Send },
+                                                { id: 'schedule', label: 'Schedule', desc: 'Pick a date and time', icon: CalendarClock },
+                                            ].map((opt) => {
+                                                const Icon = opt.icon;
+                                                const active = applyTiming === opt.id;
+                                                return (
+                                                    <label
+                                                        key={opt.id}
+                                                        className={cn(
+                                                            'tap flex cursor-pointer items-start gap-3 rounded-xl border p-3 transition-colors duration-150',
+                                                            active ? 'border-brand/50 bg-brand/8' : 'border-white/8 bg-white/2 hover:border-white/20',
+                                                        )}
                                                     >
-                                                        Use This →
-                                                    </button>
-                                                </div>
-                                            ))}
-                                        </div>
-                                        <button className="btn btn-secondary" onClick={() => setStep(1)}>← Back</button>
-                                    </>
-                                ) : (
-                                    /* ── Edit & Send selected variant ── */
-                                    <>
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
-                                            <button className="btn btn-secondary btn-sm" onClick={() => setSelectedVariant(null)}>← Choose Different</button>
-                                            <span style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>Edit if needed, then send</span>
-                                        </div>
-
-                                        <div className="form-group">
-                                            <label>Subject</label>
-                                            <input type="text" value={emailSubject} onChange={e => setEmailSubject(e.target.value)} />
+                                                        <input
+                                                            type="radio"
+                                                            name="applyTiming"
+                                                            checked={active}
+                                                            onChange={() => setApplyTiming(opt.id)}
+                                                            className="mt-0.5 size-4 accent-[var(--color-brand)]"
+                                                        />
+                                                        <Icon className={cn('mt-0.5 size-4 shrink-0', active ? 'text-brand' : 'text-subtle')} aria-hidden="true" />
+                                                        <span className="min-w-0">
+                                                            <span className="block text-sm font-semibold">{opt.label}</span>
+                                                            <span className="block text-xs text-subtle">{opt.desc}</span>
+                                                        </span>
+                                                    </label>
+                                                );
+                                            })}
                                         </div>
 
-                                        <div className="form-group">
-                                            <label>Email Body</label>
-                                            <div className="email-preview">
-                                                <div className="email-preview-header">
-                                                    <div className="email-dot" style={{ background: '#ef4444' }} />
-                                                    <div className="email-dot" style={{ background: '#f59e0b' }} />
-                                                    <div className="email-dot" style={{ background: '#22c55e' }} />
-                                                    <span style={{ marginLeft: 8, fontSize: '0.8rem', color: 'var(--text-muted)' }}>Edit directly below</span>
-                                                </div>
-                                                <textarea
-                                                    value={emailBody}
-                                                    onChange={e => setEmailBody(e.target.value)}
-                                                    style={{ width: '100%', padding: '16px 20px', background: 'transparent', border: 'none', outline: 'none', color: 'var(--text-secondary)', fontFamily: 'inherit', fontSize: '0.9rem', lineHeight: 1.7, resize: 'vertical', minHeight: 220 }}
+                                        {applyTiming === 'schedule' && (
+                                            <div className="mt-3">
+                                                <label className="ui-label" htmlFor="scheduled-at">Date and time</label>
+                                                <Input
+                                                    id="scheduled-at"
+                                                    type="datetime-local"
+                                                    value={scheduledAt}
+                                                    onChange={(e) => setScheduledAt(e.target.value)}
+                                                    min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
                                                 />
                                             </div>
-                                        </div>
+                                        )}
+                                    </fieldset>
 
-                                        <div className="form-group">
-                                            <label>Sending to ({allRecipients.length} recipient{allRecipients.length !== 1 ? 's' : ''})</label>
-                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
-                                                {allRecipients.map(r => (
-                                                    <span key={r.email} className="badge badge-purple">
-                                                        {r.firstName} {r.lastName} &lt;{r.email}&gt;
-                                                    </span>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        <div className="form-group" style={{ background: 'rgba(108, 99, 255, 0.04)', padding: '20px', borderRadius: '16px', border: '1px solid var(--border)', marginBottom: 16 }}>
-
-                                            {/* ── Resume Optimization Panel ── */}
-                                            <ResumeOptimizerPanel apiBase={API} optimizeState={optimizeState} compact={isExtension} />
-
-                                            {!optimizeState && resumeOptimizing && (
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(99,102,241,0.08)', borderRadius: 12, border: '1px solid rgba(99,102,241,0.2)', marginBottom: 16 }}>
-                                                    <div className="spinner" style={{ width: 18, height: 18, borderWidth: 2, flexShrink: 0 }} />
-                                                    <span style={{ fontSize: '0.85rem', color: '#a5b4fc', fontWeight: 600 }}>✨ Optimizing your resume against this job description…</span>
-                                                </div>
-                                            )}
-                                            {!optimizeState && !resumeOptimizing && optimizedResumeInfo && (
-                                                <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '12px 16px', background: 'rgba(16,185,129,0.06)', borderRadius: 12, border: '1px solid rgba(16,185,129,0.2)', marginBottom: 16 }}>
-                                                    <span style={{ fontSize: '1.1rem' }}>✅</span>
-                                                    <div>
-                                                        <span style={{ fontSize: '0.82rem', fontWeight: 800, color: '#10b981' }}>RESUME SELECTED: </span>
-                                                        <span style={{ fontSize: '0.85rem', color: 'white', fontWeight: 700 }}>
-                                                            {optimizedResumeInfo.selectedResume === 'genai' ? 'Gen AI Resume' : 'Backend Resume'}
-                                                        </span>
-                                                        <span style={{ fontSize: '0.8rem', color: '#6ee7b7', marginLeft: 8 }}>
-                                                            {optimizedResumeInfo.matchScore}% ATS Match
-                                                        </span>
-                                                    </div>
-                                                </div>
-                                            )}
-
-                                            {/* ── Follow-up Reminder ── */}
-                                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--accent)', fontWeight: 700, fontSize: '0.85rem' }}>
-                                                ⏰ SCHEDULE FOLLOW-UP REMINDER
-                                            </label>
-                                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 16 }}>
-                                                We'll remind you to check back if they haven't replied.
-                                            </p>
-                                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 10 }}>
-                                                {[
-                                                    { label: 'No Follow-up', days: 0 },
-                                                    { label: '2 Min (Test)', days: -1 },
-                                                    { label: '3 Days', days: 3 },
-                                                    { label: '5 Days', days: 5 },
-                                                    { label: '7 Days', days: 7 },
-                                                ].map(opt => (
-                                                    <button
-                                                        key={opt.days}
-                                                        type="button"
-                                                        onClick={() => setFollowUpDays(opt.days)}
-                                                        style={{
-                                                            padding: '10px 4px',
-                                                            borderRadius: '10px',
-                                                            fontSize: '0.85rem',
-                                                            fontWeight: 600,
-                                                            border: '1px solid',
-                                                            borderColor: followUpDays === opt.days ? 'var(--accent)' : 'var(--border)',
-                                                            background: followUpDays === opt.days ? 'rgba(108, 99, 255, 0.1)' : 'var(--bg-secondary)',
-                                                            color: followUpDays === opt.days ? 'var(--accent)' : 'var(--text-secondary)',
-                                                            transition: 'all 0.2s',
-                                                            cursor: 'pointer'
-                                                        }}
-                                                    >
-                                                        {opt.label}
-                                                    </button>
-                                                ))}
-                                            </div>
-                                        </div>
-
-                                        {/* ── Apply Timing ── */}
-                                        <div className="form-group" style={{ background: 'rgba(16, 185, 129, 0.04)', padding: '20px', borderRadius: '16px', border: '1px solid rgba(16,185,129,0.15)', marginBottom: 24 }}>
-                                            <label style={{ display: 'flex', alignItems: 'center', gap: 6, color: '#10b981', fontWeight: 700, fontSize: '0.85rem', marginBottom: 12 }}>
-                                                📅 APPLY TIMING
-                                            </label>
-                                            <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 16 }}>
-                                                Choose when your application email gets sent.
-                                            </p>
-                                            <div style={{ display: 'flex', gap: 10, marginBottom: applyTiming === 'schedule' ? 16 : 0 }}>
-                                                {[
-                                                    { id: 'now', label: '⚡ Send Now', desc: 'Dispatch immediately' },
-                                                    { id: 'schedule', label: '🗓 Schedule', desc: 'Pick a date & time' },
-                                                ].map(opt => (
-                                                    <button
-                                                        key={opt.id}
-                                                        type="button"
-                                                        id={`apply-timing-${opt.id}`}
-                                                        onClick={() => setApplyTiming(opt.id)}
-                                                        style={{
-                                                            flex: 1,
-                                                            padding: '12px 8px',
-                                                            borderRadius: '12px',
-                                                            fontSize: '0.88rem',
-                                                            fontWeight: 600,
-                                                            border: '1px solid',
-                                                            borderColor: applyTiming === opt.id ? '#10b981' : 'var(--border)',
-                                                            background: applyTiming === opt.id ? 'rgba(16,185,129,0.1)' : 'var(--bg-secondary)',
-                                                            color: applyTiming === opt.id ? '#10b981' : 'var(--text-secondary)',
-                                                            transition: 'all 0.2s',
-                                                            cursor: 'pointer',
-                                                            textAlign: 'center',
-                                                        }}
-                                                    >
-                                                        <div>{opt.label}</div>
-                                                        <div style={{ fontSize: '0.72rem', marginTop: 3, opacity: 0.7 }}>{opt.desc}</div>
-                                                    </button>
-                                                ))}
-                                            </div>
-                                            {applyTiming === 'schedule' && (
-                                                <div>
-                                                    <label style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: 8, display: 'block' }}>Pick date & time</label>
-                                                    <input
-                                                        id="scheduled-at-picker"
-                                                        type="datetime-local"
-                                                        value={scheduledAt}
-                                                        min={new Date(Date.now() + 60000).toISOString().slice(0, 16)}
-                                                        onChange={e => setScheduledAt(e.target.value)}
-                                                        style={{
-                                                            width: '100%',
-                                                            background: 'var(--bg-secondary)',
-                                                            border: '1px solid #10b981',
-                                                            color: 'white',
-                                                            borderRadius: 12,
-                                                            padding: '12px 16px',
-                                                            fontSize: '0.95rem',
-                                                            colorScheme: 'dark',
-                                                        }}
-                                                    />
-                                                    {scheduledAt && (
-                                                        <div style={{ marginTop: 8, fontSize: '0.8rem', color: '#6ee7b7', display: 'flex', alignItems: 'center', gap: 6 }}>
-                                                            ✅ Will send at: <strong>{new Date(scheduledAt).toLocaleString()}</strong>
-                                                        </div>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-
-                                        <div className="alert alert-warning" style={{ marginBottom: 16 }}>
-                                            <span>⚠</span>
-                                            <span>Make sure <strong>GMAIL_USER</strong> and <strong>GMAIL_APP_PASSWORD</strong> are set in <code>server/.env</code> before sending.</span>
-                                        </div>
-
-                                        <div style={{ display: 'flex', gap: 12 }}>
-                                            <button className="btn btn-secondary" onClick={() => setStep(1)}>← Back</button>
-                                            <button
-                                                className="btn btn-success btn-lg"
-                                                style={{ flex: 1 }}
-                                                onClick={handleSend}
-                                                disabled={sending || !emailBody || (applyTiming === 'schedule' && !scheduledAt)}
-                                            >
-                                                {sending
-                                                    ? <><span className="spinner" /> {resumeOptimizing ? 'Optimizing Resume...' : 'Sending...'}</>
-                                                    : applyTiming === 'schedule'
-                                                        ? `🗓 Schedule Application`
-                                                        : `🚀 Send to ${allRecipients.length} Recipient${allRecipients.length !== 1 ? 's' : ''}`
-                                                }
-                                            </button>
-                                        </div>
-                                    </>
-                                )}
-                            </div>
-                        )
-                    }
-                </div>
-                <Toast toasts={toasts} />
-            </main>
+                                    <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-between">
+                                        <Button type="button" variant="secondary" onClick={() => setStep(1)}>
+                                            <ArrowLeft className="size-4" aria-hidden="true" />
+                                            Back
+                                        </Button>
+                                        <Button
+                                            type="button"
+                                            size="lg"
+                                            onClick={handleSend}
+                                            disabled={sending || allRecipients.length === 0 || !emailSubject || !emailBody}
+                                            loading={sending}
+                                        >
+                                            {!sending && <Send className="size-4" aria-hidden="true" />}
+                                            {applyTiming === 'schedule' ? 'Schedule email' : `Send to ${allRecipients.length}`}
+                                        </Button>
+                                    </div>
+                                </>
+                            )}
+                        </Card>
+                    </div>
+                )}
+            </div>
         </AuthGuard>
     );
 }

@@ -1,105 +1,139 @@
-# My Fullstack App
+# Outreach.ai
 
-A full-stack application with a Next.js client and Node.js/Express server, containerized with Docker.
+Job-outreach automation. Ingest a job (URL, pasted text, uploaded document, or a
+multi-source "radar" scan), build a job-matched CV, find hiring contacts, write a
+personalised email, and send it — with scheduling, follow-ups, and a state machine
+tracking every application.
 
-## Project Structure
-- **client**: Next.js frontend
-- **server**: Node.js/Express backend
-- **docker-compose.yml**: Orchestration for local development
+## Architecture
 
-## Getting Started
+| Service | Stack | Port | Role |
+|---|---|---|---|
+| `client` | Next.js 15 (App Router) | 3000 | Web UI |
+| `server` | Node 20, Express 5, Mongoose | 5000 | API, pipeline orchestration, email, scraping |
+| `optimizer` | Python 3.11, FastAPI, SQLite | 8002 | Turns a JD + resume into a structured JSON resume |
+| `extension` | Chrome MV3 | – | 1-click outreach from a LinkedIn job page |
 
-### Prerequisites
-- Docker & Docker Compose
-- Node.js (for local development without Docker)
+MongoDB (Atlas or self-hosted) is the primary datastore. OpenAI powers email
+writing, job extraction, ATS scoring and CV generation.
 
-### Running Locally (Development)
-```bash
-docker-compose up
+### Request flow for a full application
+
 ```
-The client will be available at `http://localhost:3000` and the server at `http://localhost:5000`. Changes to your local files will reflect in the container automatically.
-
-### Running in Production
-To run the production-optimized build of the application (e.g. for deployment or showcasing without dev tools):
-```bash
-docker-compose -f docker-compose.prod.yml up -d --build
+ingest (URL / text / document / radar)
+  └─ scrape + classify ............... server/services/scrape.js
+     └─ JobApplication created ....... status: ready
+        └─ user clicks Apply Now ..... status: applying
+           └─ user approves .......... status: approved   ← the gate
+              └─ pipeline ............ server/services/pipeline.js
+                 ├─ generate_cv ...... optimizer → JSON → Puppeteer PDF
+                 ├─ find_contacts .... Hunter.io + emails in the post
+                 ├─ generate_email ... OpenAI, links appended in code
+                 └─ send_email ....... paused for review unless autoSend
 ```
-The client will be available at `http://localhost:3000` and the server at `http://localhost:5000`.
 
----
+Status changes go through the FSM in `server/services/applicationFsm.js`, so a
+stale client cannot push an application backwards or skip the approval gate.
 
-## Jenkins CI/CD Setup
+## Getting started
 
-This project includes a `Jenkinsfile` for a declarative CI/CD pipeline.
+### 1. Configure
 
-### Prerequisites for Jenkins Server
-1.  **Jenkins** installed and running.
-2.  **Docker** installed on the Jenkins agent/server.
-    *   **Why?** The pipeline uses `docker-compose` to build the application.
-    *   **Verify**: Run `docker --version` on the Jenkins server.
-3.  **Git** installed on the Jenkins agent/server.
+```bash
+cp .env.example .env
+```
 
-### Step 1: Create the Pipeline Job
-1.  Open Jenkins Dashboard.
-2.  Click **New Item**.
-3.  Enter a name (e.g., `my-fullstack-app`) and select **Pipeline**.
-4.  Click **OK**.
+Fill in at minimum `MONGODB_URL`, `JWT_SECRET`, `SESSION_SECRET` (the server
+refuses to boot without them) and `OPENAI_API_KEY`. Generate secrets with:
 
-### Step 2: Configure SCM
-1.  Scroll to the **Pipeline** section.
-2.  Set **Definition** to **Pipeline script from SCM**.
-3.  Set **SCM** to **Git**.
-4.  **Repository URL**: `https://github.com/Rajneesh2223/devop-project.git`
-5.  **Branch Specifier**: `*/main`
-6.  **Script Path**: `Jenkinsfile`
+```bash
+openssl rand -hex 32
+```
 
-### Step 3: Configure Secrets (.env)
-The `.env` file is not tracked in git for security. You must inject it using Jenkins Credentials.
+### 2. Run with Docker (recommended)
 
-1.  Go to **Dashboard** > **Manage Jenkins** > **Credentials**.
-2.  Add a new credential of kind **Secret file**.
-3.  **Upload** your local `.env` file.
-4.  **ID**: Set this EXACTLY to `my-env-file`.
-    *   *The `Jenkinsfile` specifically looks for this ID.*
-5.  Click **Create**.
+```bash
+docker compose up --build          # development, with hot reload
+docker compose -f docker-compose.prod.yml up -d --build   # production build
+```
 
-### Step 4: Run Build
-1.  Go to the job page.
-2.  Click **Build Now**.
+Client on http://localhost:3000, API on http://localhost:5000. The optimizer is
+internal (reachable as `http://optimizer:8002`).
 
-### Accessing the Application
-The pipeline now includes a **Deploy** stage that runs `docker-compose up -d`.
+### 3. Run locally without Docker
 
-**1. If Jenkins is on your Local Machine:**
-- **Client**: `http://localhost:3000`
-- **Server**: `http://localhost:5000`
+```bash
+npm run install:all
+cd ResumeOptimiser/backend && pip install -r requirements.txt && cd ../..
+npm run dev        # starts server, client and optimizer together
+```
 
-**2. If Jenkins is on a Cloud Server (AWS, Azure, etc.):**
-- **Client**: `http://<YOUR_SERVER_PUBLIC_IP>:3000`
-- **Server**: `http://<YOUR_SERVER_PUBLIC_IP>:5000`
+## Configuration
 
-> **Important:** Ensure ports **3000** and **5000** are open in your firewall or Security Group (AWS/Azure) settings.
+Every variable is documented in [.env.example](.env.example). The ones worth
+knowing about:
 
-### Automating Builds (GitHub Webhook)
+- **`OPENAI_MODEL_FAST` / `OPENAI_MODEL_QUALITY`** — model tiers. The fast tier
+  handles high-volume extraction and classification; the quality tier writes the
+  emails and CVs a human actually reads.
+- **`CORS_ORIGINS`** — comma-separated allowlist. Requests from anywhere else are
+  refused.
+- **`NEXT_PUBLIC_API_URL`** — inlined into the client bundle *at build time*, so it
+  must be set when the image is built, not just when it runs.
+- **`ENABLE_REPLY_TRACKING`** — IMAP reply scanning, off by default.
+- **`FOLLOW_UP_CRON` / `SCHEDULED_SEND_CRON`** — see "Scaling" below.
 
-To trigger builds automatically on push, you need to connect GitHub to Jenkins.
+## Email sending
 
-#### ⚠️ Critical Warning for Localhost
-If Jenkins is running on your laptop (`localhost`), **GitHub cannot see it**.
-- **Solution**: Use **ngrok** to create a public URL (e.g., `https://random.ngrok.io`).
-- **Cloud Servers**: If on AWS/Azure, just use your Public IP.
+By default all outreach goes through one shared mailbox (`GMAIL_USER`). That caps
+you at Gmail's ~500/day, means SPF/DKIM will not align with the sender's own
+domain, and lands replies in the app owner's inbox.
 
-#### Step 1: Configure Jenkins
-1.  Go to your Job > **Configure**.
-2.  Under **Build Triggers**, check **"GitHub hook trigger for GITScm polling"**.
-3.  Click **Save**.
+Users can instead connect their own Google account at
+`/api/auth/google/connect-gmail`, after which their outreach sends from their own
+mailbox. The shared mailbox remains the fallback for anyone who has not.
 
-#### Step 2: Configure GitHub
-1.  Go to your Repo > **Settings** > **Webhooks**.
-2.  Click **Add webhook**.
-3.  **Payload URL**: `http://<YOUR_JENKINS_URL>:8080/github-webhook/`
-    *   *Cloud Example*: `http://123.45.67.89:8080/github-webhook/`
-    *   *Ngrok Example*: `https://random.ngrok.io/github-webhook/`
-4.  **Content type**: `application/json`.
-5.  **Events**: Select **"Just the push event"**.
-6.  Click **Add webhook**.
+## Testing
+
+```bash
+cd server && npm test      # unit tests: FSM, email composition, mailer, PDF
+                           # extraction, auth middleware, cron claim
+cd client && npm run lint && npm run build
+```
+
+## Scaling
+
+The server is safe to run as multiple replicas with one caveat:
+
+- Pipelines and radar scans take a Mongo-backed lock (`server/services/lock.js`),
+  so two replicas cannot run the same one.
+- The follow-up and scheduled-send crons claim each row atomically
+  (`server/services/jobClaim.js`) before acting, so no email is sent twice.
+- **However**, every replica still *runs* both cron schedules. That is correct but
+  wasteful. For more than a couple of replicas, run the crons on a single
+  dedicated instance and set `FOLLOW_UP_CRON` / `SCHEDULED_SEND_CRON` to an empty
+  value elsewhere.
+
+Long work (CV rendering, council scraping, radar scans) runs as detached promises
+inside the API process. That is the main remaining architectural limit: a proper
+job queue would give per-job retries and let workers scale separately from the API.
+
+## Known limitations
+
+- **Scraping connectors** for Indeed, Glassdoor, Google Jobs and Wellfound are
+  best-effort and sit behind anti-bot protection. They fail soft (returning no
+  results) rather than breaking a scan. Adzuna and JSearch are official APIs and
+  are the reliable sources.
+- **Hunter.io free tier** allows 25 lookups/month, which is the practical ceiling
+  on contact discovery.
+- **The Chrome extension** defaults to `http://localhost:3000`. Point it at a
+  deployment by setting `appUrl` in extension storage, and update
+  `host_permissions` in `extension/manifest.json` to match your domain.
+
+## CI/CD
+
+[Jenkinsfile](Jenkinsfile) runs tests and the client build in parallel, builds the
+production images, deploys with compose, and polls `/api/health` — failing the
+build if the API never becomes healthy.
+
+Add your `.env` as a Jenkins **Secret file** credential with the ID `my-env-file`.

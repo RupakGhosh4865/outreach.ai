@@ -8,6 +8,11 @@ if (window.outreach_script_loaded) {
     console.log("[Outreach] Content script initializing...");
 
     let modalVisible = false;
+    // Populated before the modal is built; falls back to the dev default.
+    let appUrl = "http://localhost:3000";
+    chrome.storage.local.get("appUrl").then(({ appUrl: saved }) => {
+        if (saved) appUrl = String(saved).replace(/\/$/, "");
+    }).catch(() => { /* keep the default */ });
 
     function extractJobData() {
         const title = document.querySelector(
@@ -71,7 +76,8 @@ if (window.outreach_script_loaded) {
 
     const iframe = document.createElement("iframe");
     iframe.id = "outreach-iframe";
-    iframe.src = "http://localhost:3000/outreach?source=chrome-extension";
+    // Resolved from storage so a packaged extension can point at production.
+    iframe.src = `${appUrl}/outreach?source=chrome-extension`;
     iframe.style.cssText = `
         flex: 1;
         width: 100%;
@@ -119,12 +125,14 @@ function sendJobData() {
     const data = extractJobData();
     const iframe = document.getElementById("outreach-iframe");
     if (iframe && iframe.contentWindow) {
+        // Targeted at the app origin rather than "*" so the message is not
+        // readable by whatever else happens to be framed.
         iframe.contentWindow.postMessage({
             type: "EXTENSION_JOB_URL",
             url: data.url,
             title: data.title,
             company: data.company
-        }, "http://localhost:3000");
+        }, appUrl);
     }
 }
 

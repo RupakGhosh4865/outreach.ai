@@ -1,219 +1,209 @@
 'use client';
+
 import { useState } from 'react';
-import { Users, Briefcase, FileText, Sparkles, ArrowRight, CheckCircle } from 'lucide-react';
+import {
+    ArrowLeft, ArrowRight, Briefcase, Check, FileText, Sparkles, Upload, Users,
+} from 'lucide-react';
+import { Button, Field, Input, cn } from './ui';
+
+const STEPS = [
+    { id: 1, title: 'Basics', icon: Users },
+    { id: 2, title: 'Role', icon: Briefcase },
+    { id: 3, title: 'Resume', icon: FileText },
+    { id: 4, title: 'Ready', icon: Sparkles },
+];
 
 export default function Onboarding({ onFinish }) {
     const [step, setStep] = useState(1);
     const [formData, setFormData] = useState({
         name: '',
-        roleType: 'tech', // tech or non-tech
+        roleType: 'tech',
         targetRole: '',
         experience: '',
-        resume: null
+        resume: null,
     });
 
-    const nextStep = () => setStep(s => s + 1);
-    const prevStep = () => setStep(s => s - 1);
-
-    const steps = [
-        { id: 1, title: 'Basics', icon: <Users size={18} /> },
-        { id: 2, title: 'Role', icon: <Briefcase size={18} /> },
-        { id: 3, title: 'Resume', icon: <FileText size={18} /> },
-        { id: 4, title: 'Ready', icon: <Sparkles size={18} /> }
-    ];
+    const nextStep = () => setStep((s) => s + 1);
+    const prevStep = () => setStep((s) => s - 1);
+    const update = (patch) => setFormData((d) => ({ ...d, ...patch }));
 
     return (
-        <div className="onboarding-overlay">
-            <div className="onboarding-card">
-                <div className="stepper">
-                    {steps.map((s, i) => (
-                        <div key={s.id} className="step-item">
-                            <div className={`step-circle ${step === s.id ? 'active' : step > s.id ? 'done' : ''}`}>
-                                {step > s.id ? <CheckCircle size={14} /> : <span className="text-[10px] font-bold">{s.id}</span>}
-                            </div>
-                            <div className={`step-label ${step === s.id ? 'active' : ''}`}>{s.title}</div>
-                            {i < steps.length - 1 && <div className={`step-line ${step > s.id ? 'done' : ''}`} />}
-                        </div>
-                    ))}
-                </div>
+        <div className="relative flex min-h-dvh items-center justify-center p-4 sm:p-6">
+            <div className="aurora" aria-hidden="true" />
+
+            <div className="ui-card relative w-full max-w-lg p-6 sm:p-8">
+                {/* Progress */}
+                <nav aria-label="Progress" className="mb-8">
+                    <ol className="flex items-center gap-2">
+                        {STEPS.map((s, i) => {
+                            const done = step > s.id;
+                            const active = step === s.id;
+                            return (
+                                <li key={s.id} className={cn('flex items-center gap-2', i < STEPS.length - 1 && 'flex-1')}>
+                                    <span
+                                        aria-current={active ? 'step' : undefined}
+                                        className={cn(
+                                            'grid size-7 shrink-0 place-items-center rounded-full text-xs font-bold transition-colors',
+                                            done && 'bg-brand text-brand-ink',
+                                            active && 'bg-brand/15 text-brand ring-2 ring-brand',
+                                            !done && !active && 'bg-white/5 text-subtle ring-1 ring-white/10',
+                                        )}
+                                    >
+                                        {done ? <Check className="size-3.5" aria-hidden="true" /> : s.id}
+                                    </span>
+                                    {i < STEPS.length - 1 && (
+                                        <span
+                                            aria-hidden="true"
+                                            className={cn('h-px flex-1 transition-colors', done ? 'bg-brand' : 'bg-white/10')}
+                                        />
+                                    )}
+                                </li>
+                            );
+                        })}
+                    </ol>
+                    <p className="sr-only">Step {step} of {STEPS.length}: {STEPS[step - 1].title}</p>
+                </nav>
 
                 {step === 1 && (
-                    <div className="onboarding-step">
-                        <h2 className="step-title">Let&apos;s get started</h2>
-                        <p className="step-desc">First, what should we call you?</p>
-                        <div className="form-group">
-                            <label className="text-[10px] font-bold uppercase tracking-widest text-[#A8E063] mb-2 block">Full Name</label>
-                            <input
-                                type="text"
-                                className="w-full bg-[#060D18] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-[#A8E063] outline-none transition-all"
-                                placeholder="Jane Doe"
+                    <div className="animate-fade-up">
+                        <h1 className="text-xl font-extrabold tracking-tight">Let&apos;s get started</h1>
+                        <p className="mt-2 mb-6 text-sm text-muted">First, what should we call you?</p>
+
+                        <Field label="Full name" htmlFor="ob-name">
+                            <Input
+                                id="ob-name"
+                                autoComplete="name"
+                                placeholder="Ada Lovelace"
                                 value={formData.name}
-                                onChange={e => setFormData({ ...formData, name: e.target.value })}
-                                autoFocus
+                                onChange={(e) => update({ name: e.target.value })}
                             />
-                        </div>
-                        <button className="w-full py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2 mt-8 disabled:opacity-50" onClick={nextStep} disabled={!formData.name}>
-                            Continue <ArrowRight size={18} />
-                        </button>
+                        </Field>
+
+                        <Button type="button" block size="lg" onClick={nextStep} disabled={!formData.name}>
+                            Continue
+                            <ArrowRight className="size-4" aria-hidden="true" />
+                        </Button>
                     </div>
                 )}
 
                 {step === 2 && (
-                    <div className="onboarding-step">
-                        <h2 className="step-title">What&apos;s your focus?</h2>
-                        <p className="step-desc">We&apos;ll tailor your outreach based on your role.</p>
+                    <div className="animate-fade-up">
+                        <h1 className="text-xl font-extrabold tracking-tight">What&apos;s your focus?</h1>
+                        <p className="mt-2 mb-6 text-sm text-muted">We&apos;ll tailor your outreach to it.</p>
 
-                        <div className="grid grid-cols-2 gap-4 mb-8">
-                            <label className={`cursor-pointer p-4 rounded-xl border transition-all ${formData.roleType === 'tech' ? 'bg-[#A8E063]/10 border-[#A8E063]' : 'bg-[#060D18] border-white/10 opacity-40 hover:opacity-100'}`}>
-                                <input type="radio" className="hidden" name="role" checked={formData.roleType === 'tech'} onChange={() => setFormData({ ...formData, roleType: 'tech' })} />
-                                <div className="text-xl mb-1">💻</div>
-                                <div className="text-sm font-bold text-white">Tech</div>
-                            </label>
-                            <label className={`cursor-pointer p-4 rounded-xl border transition-all ${formData.roleType === 'nontech' ? 'bg-[#A8E063]/10 border-[#A8E063]' : 'bg-[#060D18] border-white/10 opacity-40 hover:opacity-100'}`}>
-                                <input type="radio" className="hidden" name="role" checked={formData.roleType === 'nontech'} onChange={() => setFormData({ ...formData, roleType: 'nontech' })} />
-                                <div className="text-xl mb-1">🤝</div>
-                                <div className="text-sm font-bold text-white">Non-Tech</div>
-                            </label>
-                        </div>
+                        <fieldset className="mb-5">
+                            <legend className="ui-label">Field</legend>
+                            <div className="grid grid-cols-2 gap-3">
+                                {[
+                                    { id: 'tech', label: 'Tech' },
+                                    { id: 'nontech', label: 'Non-tech' },
+                                ].map((opt) => {
+                                    const active = formData.roleType === opt.id;
+                                    return (
+                                        <label
+                                            key={opt.id}
+                                            className={cn(
+                                                'tap flex min-h-12 cursor-pointer items-center justify-center gap-2 rounded-xl border text-sm font-bold transition-colors',
+                                                active ? 'border-brand/50 bg-brand/10 text-brand' : 'border-white/10 bg-white/2 text-muted hover:border-white/25',
+                                            )}
+                                        >
+                                            <input
+                                                type="radio"
+                                                name="roleType"
+                                                className="sr-only"
+                                                checked={active}
+                                                onChange={() => update({ roleType: opt.id })}
+                                            />
+                                            {active && <Check className="size-4" aria-hidden="true" />}
+                                            {opt.label}
+                                        </label>
+                                    );
+                                })}
+                            </div>
+                        </fieldset>
 
-                        <div className="form-group mb-8">
-                            <label className="text-[10px] font-bold uppercase tracking-widest text-[#A8E063] mb-2 block">Target Role</label>
-                            <input
-                                type="text"
-                                className="w-full bg-[#060D18] border border-white/10 rounded-lg px-4 py-3 text-white focus:border-[#A8E063] outline-none transition-all"
-                                placeholder="e.g. Senior Frontend Developer"
+                        <Field label="Target role" htmlFor="ob-role">
+                            <Input
+                                id="ob-role"
+                                placeholder="Senior Frontend Developer"
                                 value={formData.targetRole}
-                                onChange={e => setFormData({ ...formData, targetRole: e.target.value })}
+                                onChange={(e) => update({ targetRole: e.target.value })}
                             />
-                        </div>
+                        </Field>
 
-                        <div className="flex gap-4">
-                            <button className="flex-1 py-4 border border-white/10 text-white font-bold rounded-lg hover:bg-white/5 transition-all" onClick={prevStep}>Back</button>
-                            <button className="flex-1 py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2 disabled:opacity-50" onClick={nextStep} disabled={!formData.targetRole}>
-                                Move On <ArrowRight size={18} />
-                            </button>
+                        <div className="flex gap-3">
+                            <Button type="button" variant="secondary" onClick={prevStep} className="flex-1">
+                                <ArrowLeft className="size-4" aria-hidden="true" />
+                                Back
+                            </Button>
+                            <Button type="button" onClick={nextStep} disabled={!formData.targetRole} className="flex-1">
+                                Continue
+                                <ArrowRight className="size-4" aria-hidden="true" />
+                            </Button>
                         </div>
                     </div>
                 )}
 
                 {step === 3 && (
-                    <div className="onboarding-step">
-                        <h2 className="step-title">Upload your resume</h2>
-                        <p className="step-desc">Our AI will parse this to write better emails (Optional).</p>
+                    <div className="animate-fade-up">
+                        <h1 className="text-xl font-extrabold tracking-tight">Upload your resume</h1>
+                        <p className="mt-2 mb-6 text-sm text-muted">
+                            We parse it to write better emails. You can skip and add it later.
+                        </p>
 
-                        <div className="relative border-2 border-dashed border-white/10 rounded-2xl p-10 text-center hover:border-[#A8E063]/40 transition-all cursor-pointer bg-[#060D18]/40 mb-8">
-                            <input type="file" className="absolute inset-0 opacity-0 cursor-pointer" onChange={e => setFormData({ ...formData, resume: e.target.files[0] })} />
-                            <div className="text-3xl mb-4">📄</div>
-                            <div className="text-sm font-bold text-white mb-1">{formData.resume ? formData.resume.name : 'Drop your resume here'}</div>
-                            <div className="text-xs text-white/20 uppercase tracking-widest font-bold">PDF or Word, max 5MB</div>
-                        </div>
+                        <input
+                            id="ob-resume"
+                            type="file"
+                            accept=".pdf,.doc,.docx"
+                            className="sr-only"
+                            onChange={(e) => update({ resume: e.target.files[0] })}
+                        />
+                        <label
+                            htmlFor="ob-resume"
+                            className={cn(
+                                'tap mb-6 flex cursor-pointer flex-col items-center gap-2 rounded-xl border border-dashed p-8 text-center transition-colors',
+                                formData.resume ? 'border-brand/40 bg-brand/6' : 'border-white/15 bg-white/2 hover:border-brand/40',
+                            )}
+                        >
+                            <span className={cn('grid size-11 place-items-center rounded-xl', formData.resume ? 'bg-brand/12 text-brand' : 'bg-white/5 text-subtle')}>
+                                {formData.resume ? <Check className="size-5" aria-hidden="true" /> : <Upload className="size-5" aria-hidden="true" />}
+                            </span>
+                            <span className="text-sm font-semibold">
+                                {formData.resume ? formData.resume.name : 'Click to upload'}
+                            </span>
+                            <span className="text-xs text-subtle">PDF or Word, max 5 MB</span>
+                        </label>
 
-                        <div className="flex gap-4">
-                            <button className="flex-1 py-4 border border-white/10 text-white font-bold rounded-lg hover:bg-white/5 transition-all" onClick={prevStep}>Back</button>
-                            <button className="flex-1 py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2" onClick={nextStep}>
-                                {formData.resume ? 'Resume Attached' : 'Skip for now'} <ArrowRight size={18} />
-                            </button>
+                        <div className="flex gap-3">
+                            <Button type="button" variant="secondary" onClick={prevStep} className="flex-1">
+                                <ArrowLeft className="size-4" aria-hidden="true" />
+                                Back
+                            </Button>
+                            <Button type="button" onClick={nextStep} className="flex-1">
+                                {formData.resume ? 'Continue' : 'Skip for now'}
+                                <ArrowRight className="size-4" aria-hidden="true" />
+                            </Button>
                         </div>
                     </div>
                 )}
 
                 {step === 4 && (
-                    <div className="onboarding-step text-center">
-                        <div className="w-20 h-20 rounded-full bg-[#A8E063]/10 flex items-center justify-center text-[#A8E063] mx-auto mb-8">
-                            <Sparkles size={40} />
-                        </div>
-                        <h2 className="step-title">You&apos;re all set!</h2>
-                        <p className="step-desc" style={{ maxWidth: 'unset' }}>
-                            We&apos;ve prepared your profile. Now, sign in with Google or LinkedIn to finalize your account and start your outreach.
+                    <div className="animate-fade-up text-center">
+                        <span className="mx-auto mb-5 grid size-14 place-items-center rounded-2xl bg-brand/12 text-brand ring-1 ring-brand/25">
+                            <Sparkles className="size-7" aria-hidden="true" />
+                        </span>
+                        <h1 className="text-xl font-extrabold tracking-tight">You&apos;re all set</h1>
+                        <p className="mx-auto mt-2 mb-8 max-w-sm text-sm text-muted">
+                            Sign in and we&apos;ll carry {formData.name ? formData.name.split(' ')[0] : 'your'} details over
+                            to your profile.
                         </p>
-
-                        <button className="w-full py-5 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all flex items-center justify-center gap-2 text-lg hover:shadow-[0_8px_30px_rgba(168,224,99,0.3)]" onClick={() => onFinish(formData)}>
-                            Go to Sign In <ArrowRight size={20} />
-                        </button>
+                        <Button type="button" size="lg" block onClick={() => onFinish(formData)}>
+                            Create my account
+                            <ArrowRight className="size-4" aria-hidden="true" />
+                        </Button>
                     </div>
                 )}
             </div>
-
-            <style jsx>{`
-                .onboarding-overlay {
-                    position: fixed;
-                    inset: 0;
-                    background: rgba(6, 13, 24, 0.98);
-                    backdrop-filter: blur(12px);
-                    z-index: 1000;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    padding: 24px;
-                }
-                .onboarding-card {
-                    max-width: 520px;
-                    width: 100%;
-                    padding: 48px;
-                    background: #0F2137;
-                    border: 1px solid rgba(255, 255, 255, 0.05);
-                    border-radius: 24px;
-                    box-shadow: 0 40px 100px rgba(0, 0, 0, 0.5);
-                }
-                .stepper {
-                    display: flex;
-                    justify-content: space-between;
-                    margin-bottom: 48px;
-                }
-                .step-item {
-                    display: flex;
-                    flex-direction: column;
-                    align-items: center;
-                    gap: 8px;
-                    flex: 1;
-                    position: relative;
-                }
-                .step-circle {
-                    width: 24px;
-                    height: 24px;
-                    border-radius: 50%;
-                    background: rgba(255, 255, 255, 0.05);
-                    color: rgba(255, 255, 255, 0.2);
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    transition: all 0.3s;
-                    border: 1px solid rgba(255, 255, 255, 0.05);
-                    z-index: 2;
-                }
-                .step-circle.active {
-                    background: #A8E063;
-                    color: #060D18;
-                    box-shadow: 0 0 15px rgba(168, 224, 99, 0.4);
-                }
-                .step-circle.done {
-                    background: #1a2e4d;
-                    color: #A8E063;
-                    border-color: #A8E063/20;
-                }
-                .step-label {
-                    font-size: 10px;
-                    font-weight: 700;
-                    text-transform: uppercase;
-                    letter-spacing: 0.05em;
-                    color: rgba(255, 255, 255, 0.2);
-                }
-                .step-label.active {
-                    color: #A8E063;
-                }
-                .step-line {
-                    position: absolute;
-                    top: 12px;
-                    left: 50%;
-                    width: 100%;
-                    height: 1px;
-                    background: rgba(255, 255, 255, 0.05);
-                    z-index: 1;
-                }
-                .step-line.done {
-                    background: #A8E063/20;
-                }
-            `}</style>
         </div>
     );
 }

@@ -20,6 +20,13 @@ const userProfileSchema = new mongoose.Schema({
   resumeGenaiName: { type: String, default: null },
   resumeBackendPath: { type: String, default: null },
   resumeBackendName: { type: String, default: null },
+  // Per-user Gmail sending. When present, outreach goes out from the user's own
+  // mailbox (aligned SPF/DKIM, replies land with them) instead of the shared one.
+  gmail: {
+    address: { type: String, default: null },
+    refreshToken: { type: String, default: null, select: false },
+    connectedAt: { type: Date, default: null },
+  },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
   subscription: {

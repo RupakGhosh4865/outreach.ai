@@ -2,11 +2,9 @@ import 'dotenv/config';
 import cron from 'node-cron';
 import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
-import Groq from "groq-sdk";
 import Reply from '../models/Reply.js';
 import JobRequest from '../models/JobRequest.js';
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+import { chatJson } from './llm.js';
 
 /**
  * Reply Tracking Service
@@ -149,7 +147,7 @@ export async function checkForNewReplies() {
 }
 
 /**
- * Uses Groq AI to analyze sentiment and category of the reply
+ * Classifies the sentiment and category of a reply.
  */
 async function analyzeReply(text) {
     if (!text || text.trim().length === 0) {
@@ -157,44 +155,38 @@ async function analyzeReply(text) {
     }
 
     try {
-        const systemPrompt = "You are an expert AI assistant specialized in analyzing email replies from recruiters, hiring managers, and employees. Your goal is to accurately categorize the intent of the reply and determine the sender's sentiment.";
-        const userPrompt = `Analyze the following email reply content:
+        const result = await chatJson({
+            system: "You classify email replies to job outreach from recruiters, hiring managers and employees.",
+            user: `Email reply content:
 ---
 ${text.slice(0, 3000)}
 ---
 
-TASK:
-Identify the sentiment (positive, neutral, negative) and the category (interview, rejection, info, other).
+CATEGORY DEFINITIONS:
+- "interview": the sender wants to schedule a call, meeting or interview.
+- "info": the sender is asking for more information, a resume update, or a portfolio link.
+- "rejection": the sender states they are not moving forward, or the position is filled.
+- "other": any other professional response.
 
-CATEGORIES DEFINITIONS:
-- "interview": The sender wants to schedule a call, meeting, or interview.
-- "info": The sender is asking for more information, a resume update, or a portfolio link.
-- "rejection": The sender explicitly states they are not moving forward or the position is filled.
-- "other": Any other professional response that doesn't fit the above.
-
-RESPONSE FORMAT:
-You MUST return ONLY a valid JSON object with the following structure:
-{
-  "sentiment": "positive" | "neutral" | "negative",
-  "category": "interview" | "rejection" | "info" | "other"
-}`;
-
-        const completion = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt }
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.1, // Low temperature for consistent classification
+Treat an out-of-office auto-reply as neutral/other.`,
+            schema: {
+                type: 'object',
+                properties: {
+                    sentiment: { type: 'string', enum: ['positive', 'neutral', 'negative'] },
+                    category: { type: 'string', enum: ['interview', 'rejection', 'info', 'other'] },
+                },
+                required: ['sentiment', 'category'],
+                additionalProperties: false,
+            },
+            schemaName: 'reply_analysis',
+            temperature: 0.1, // consistent classification
+            maxTokens: 100,
+            label: 'analyze-reply',
         });
 
-        const result = JSON.parse(completion.choices[0].message.content);
-
-        // Basic validation of the AI response
+        // The schema constrains these, but a json_object fallback path does not.
         const validSentiments = ['positive', 'neutral', 'negative'];
         const validCategories = ['interview', 'rejection', 'info', 'other'];
-
         if (!validSentiments.includes(result.sentiment)) result.sentiment = 'neutral';
         if (!validCategories.includes(result.category)) result.category = 'other';
 

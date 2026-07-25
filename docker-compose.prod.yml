@@ -1,23 +1,87 @@
+# Production-shaped stack: three services, persistent volumes, health-gated
+# startup ordering, and every secret passed through explicitly.
+#
+# Requires a .env alongside this file (see .env.example).
+
 services:
   server:
     build:
       context: ./server
       dockerfile: Dockerfile.prod
-    image: my-fullstack-app-server-prod
+    image: outreachai-server
+    restart: unless-stopped
     ports:
       - "5000:5000"
+    volumes:
+      # Uploaded resumes are on disk; without this they vanish on every deploy.
+      - server_uploads:/app/uploads
     environment:
       - NODE_ENV=production
+      # Required — boot fails fast if any of these are missing or weak.
       - MONGODB_URL=${MONGODB_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
+      # Service wiring
+      - RESUME_OPTIMIZER_URL=http://optimizer:8002
+      - CLIENT_URL=${CLIENT_URL}
+      - CORS_ORIGINS=${CORS_ORIGINS}
+      # Feature keys
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_FAST=${OPENAI_MODEL_FAST:-gpt-4o-mini}
+      - OPENAI_MODEL_QUALITY=${OPENAI_MODEL_QUALITY:-gpt-4o}
+      - HUNTER_API_KEY=${HUNTER_API_KEY}
+      - GMAIL_USER=${GMAIL_USER}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - LINKEDIN_CLIENT_ID=${LINKEDIN_CLIENT_ID}
+      - LINKEDIN_CLIENT_SECRET=${LINKEDIN_CLIENT_SECRET}
+      - ADZUNA_APP_ID=${ADZUNA_APP_ID}
+      - ADZUNA_APP_KEY=${ADZUNA_APP_KEY}
+      - RAPIDAPI_KEY=${RAPIDAPI_KEY}
+      - ENABLE_REPLY_TRACKING=${ENABLE_REPLY_TRACKING:-false}
+      # Crons: keep these on exactly one replica if you scale the server out.
+      - FOLLOW_UP_CRON=${FOLLOW_UP_CRON:-0 * * * *}
+      - SCHEDULED_SEND_CRON=${SCHEDULED_SEND_CRON:-* * * * *}
+    depends_on:
+      optimizer:
+        condition: service_healthy
 
   client:
     build:
       context: ./client
       dockerfile: Dockerfile.prod
-    image: my-fullstack-app-client-prod
+      args:
+        # Inlined into the bundle at build time, not read at runtime.
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+    image: outreachai-client
+    restart: unless-stopped
     ports:
       - "3000:3000"
     environment:
       - NODE_ENV=production
     depends_on:
-      - server
+      server:
+        condition: service_healthy
+
+  optimizer:
+    build:
+      context: ./ResumeOptimiser/backend
+      dockerfile: Dockerfile
+    image: outreachai-optimizer
+    restart: unless-stopped
+    # Internal only — reached as http://optimizer:8002 from the server. Publish
+    # a port here only if you need to debug it directly.
+    expose:
+      - "8002"
+    volumes:
+      - optimizer_data:/app/data
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_QUALITY=${OPENAI_MODEL_QUALITY:-gpt-4o}
+      - OPTIMIZER_ALLOWED_ORIGINS=http://server:5000
+      - DB_PATH=/app/data/resume_history.db
+
+volumes:
+  server_uploads:
+  optimizer_data:
