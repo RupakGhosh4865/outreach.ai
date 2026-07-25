@@ -1,37 +1,47 @@
 'use client';
+
 import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+    Building2, CalendarClock, Check, Clock, ExternalLink, MapPin, Radar,
+    ShieldCheck, Star, X,
+} from 'lucide-react';
+import { Alert, Badge, Button, Card, CardTitle, EmptyState, Select, cn } from './ui';
+import { apiGet, apiPost } from '@/lib/api';
 
 const SOURCE_META = {
-    adzuna: { label: 'Adzuna', color: '#60a5fa' },
-    jsearch: { label: 'Google Jobs API', color: '#34d399' },
-    linkedin: { label: 'LinkedIn', color: '#0a66c2' },
-    indeed: { label: 'Indeed', color: '#2557a7' },
-    glassdoor: { label: 'Glassdoor', color: '#0caa41' },
-    wellfound: { label: 'Wellfound', color: '#ec4899' },
-    google: { label: 'Google', color: '#fbbf24' },
-    github: { label: 'GitHub', color: '#a78bfa' },
-    council: { label: 'UK Councils 🏛', color: '#f97316' },
+    adzuna: { label: 'Adzuna' },
+    jsearch: { label: 'Google Jobs API' },
+    linkedin: { label: 'LinkedIn' },
+    indeed: { label: 'Indeed' },
+    glassdoor: { label: 'Glassdoor' },
+    wellfound: { label: 'Wellfound' },
+    google: { label: 'Google' },
+    github: { label: 'GitHub' },
+    council: { label: 'UK Councils' },
 };
 
-const scoreColor = (s) => (s == null ? 'var(--text-muted)' : s >= 70 ? '#34d399' : s >= 40 ? '#fbbf24' : '#94a3b8');
-
+/**
+ * Match score as a ring. The number is always present, so the score is readable
+ * without relying on the colour of the arc.
+ */
 function ScoreRing({ score }) {
-    const color = scoreColor(score);
+    const tone = score == null ? 'text-subtle' : score >= 70 ? 'text-success' : score >= 40 ? 'text-warning' : 'text-muted';
+    const arc = score == null ? 'rgba(148,163,184,0.15)' : 'currentColor';
+
     return (
-        <div style={{
-            width: 52, height: 52, borderRadius: '50%', flexShrink: 0,
-            background: score == null
-                ? 'var(--bg-primary)'
-                : `conic-gradient(${color} ${score * 3.6}deg, rgba(148,163,184,0.15) 0deg)`,
-            display: 'flex', alignItems: 'center', justifyContent: 'center',
-        }}>
-            <div style={{
-                width: 42, height: 42, borderRadius: '50%', background: 'var(--bg-secondary)',
-                display: 'flex', alignItems: 'center', justifyContent: 'center',
-                fontSize: '0.8rem', fontWeight: 800, color,
-            }}>
+        <div
+            className={cn('grid size-13 shrink-0 place-items-center rounded-full', tone)}
+            style={{
+                background: score == null
+                    ? 'rgba(148,163,184,0.10)'
+                    : `conic-gradient(${arc} ${score * 3.6}deg, rgba(148,163,184,0.15) 0deg)`,
+            }}
+            role="img"
+            aria-label={score == null ? 'Not scored yet' : `Match score ${score} out of 100`}
+        >
+            <span className={cn('grid size-10.5 place-items-center rounded-full bg-surface text-sm font-extrabold', tone)} data-numeric>
                 {score == null ? '—' : score}
-            </div>
+            </span>
         </div>
     );
 }
@@ -40,7 +50,7 @@ function ScoreRing({ score }) {
  * Job Radar: scans every source for jobs matching the profile's target roles,
  * ATS-scores each against the resume, and hands picks to the Apply pipeline.
  */
-export default function JobRadar({ apiBase, userEmail, isExtension, onApplicationChange }) {
+export default function JobRadar({ userEmail, isExtension, onApplicationChange }) {
     const [sources, setSources] = useState(Object.keys(SOURCE_META));
     const [scan, setScan] = useState(null);       // live ScanRun doc
     const [jobs, setJobs] = useState([]);
@@ -54,11 +64,10 @@ export default function JobRadar({ apiBase, userEmail, isExtension, onApplicatio
     const loadJobs = useCallback(async () => {
         if (!userEmail) return;
         try {
-            const res = await fetch(`${apiBase}/api/job-radar/jobs?userEmail=${encodeURIComponent(userEmail)}${minScore ? `&minScore=${minScore}` : ''}`);
-            const data = await res.json();
-            if (res.ok) setJobs(data.jobs || []);
+            const data = await apiGet(`/api/job-radar/jobs${minScore ? `?minScore=${minScore}` : ''}`);
+            setJobs(data.jobs || []);
         } catch { /* transient — next poll retries */ }
-    }, [apiBase, userEmail, minScore]);
+    }, [userEmail, minScore]);
 
     useEffect(() => { loadJobs(); }, [loadJobs]);
 
@@ -66,33 +75,26 @@ export default function JobRadar({ apiBase, userEmail, isExtension, onApplicatio
     useEffect(() => {
         clearInterval(pollRef.current);
         if (!scan || scan.status !== 'running') return;
+        const scanId = scan._id;
         pollRef.current = setInterval(async () => {
             try {
-                const res = await fetch(`${apiBase}/api/job-radar/scan/${scan._id}`);
-                const data = await res.json();
-                if (!res.ok) return;
+                const data = await apiGet(`/api/job-radar/scan/${scanId}`);
                 setScan(data.scan);
                 loadJobs(); // stream results in as sources finish
                 if (data.scan.status !== 'running') clearInterval(pollRef.current);
             } catch { /* retry on next tick */ }
         }, 3000);
         return () => clearInterval(pollRef.current);
-    }, [scan?._id, scan?.status, apiBase, loadJobs]);
+    }, [scan, loadJobs]);
 
     async function startScan() {
         if (!userEmail) { setError('Sign in and set up your profile first.'); return; }
         setStarting(true);
         setError('');
         try {
-            const res = await fetch(`${apiBase}/api/job-radar/scan`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ userEmail, sources }),
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.message || 'Could not start scan');
-            const sr = await fetch(`${apiBase}/api/job-radar/scan/${data.scanId}`);
-            setScan((await sr.json()).scan);
+            const data = await apiPost('/api/job-radar/scan', { sources });
+            const sr = await apiGet(`/api/job-radar/scan/${data.scanId}`);
+            setScan(sr.scan);
         } catch (e) {
             setError(e.message);
         }
@@ -104,17 +106,13 @@ export default function JobRadar({ apiBase, userEmail, isExtension, onApplicatio
         try {
             if (action === 'apply') {
                 if (job.applyUrl) window.open(job.applyUrl, '_blank', 'noopener');
-                const res = await fetch(`${apiBase}/api/job-radar/jobs/${job._id}/to-pipeline`, { method: 'POST' });
-                const data = await res.json();
-                if (!res.ok) throw new Error(data.message);
+                const data = await apiPost(`/api/job-radar/jobs/${job._id}/to-pipeline`, {});
                 // mark apply-clicked so the Approve/Deny gate appears in the pipeline panel
-                await fetch(`${apiBase}/api/applications/${data.application._id}/apply-clicked`, {
-                    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-                }).catch(() => { /* ready state still shows in pipeline */ });
+                await apiPost(`/api/applications/${data.application._id}/apply-clicked`, {})
+                    .catch(() => { /* ready state still shows in pipeline */ });
                 onApplicationChange?.();
             } else {
-                const res = await fetch(`${apiBase}/api/job-radar/jobs/${job._id}/${action}`, { method: 'POST' });
-                if (!res.ok) throw new Error((await res.json()).message);
+                await apiPost(`/api/job-radar/jobs/${job._id}/${action}`, {});
             }
             await loadJobs();
         } catch (e) {
@@ -127,159 +125,239 @@ export default function JobRadar({ apiBase, userEmail, isExtension, onApplicatio
     const scanning = scan?.status === 'running';
     const fmtDate = (d) => (d ? new Date(d).toLocaleDateString('en-GB', { day: 'numeric', month: 'short' }) : null);
 
-    return (
-        <div className="form-group" style={{ marginBottom: 32, padding: 24, background: 'rgba(249,115,22,0.04)', borderRadius: 20, border: '1px solid rgba(249,115,22,0.15)', position: 'relative' }}>
-            <div style={{ position: 'absolute', top: 0, left: 0, width: 4, height: '100%', background: '#f97316' }} />
+    // The server already applies the minScore filter on fetch.
+    const filtered = jobs;
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, flexWrap: 'wrap', gap: 8 }}>
-                <label style={{ color: '#f97316', display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
-                    📡 Job Radar
-                </label>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                    Scans every source for your target roles, ATS-scores each job against your resume
-                </div>
-            </div>
+    return (
+        <Card className="mb-4">
+            <CardTitle
+                icon={Radar}
+                accent="warning"
+                title="Job radar"
+                description="Scan every source for roles matching your profile."
+                action={
+                    <Button type="button" onClick={startScan} disabled={starting || scanning} loading={starting || scanning} size="sm">
+                        {!(starting || scanning) && <Radar className="size-3.5" aria-hidden="true" />}
+                        {scanning ? 'Scanning…' : 'Start scan'}
+                    </Button>
+                }
+            />
+
+            {error && <Alert tone="danger" className="mb-4">{error}</Alert>}
 
             {/* Source toggles */}
-            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
-                {Object.entries(SOURCE_META).map(([key, meta]) => {
-                    const on = sources.includes(key);
-                    return (
-                        <button key={key} type="button" onClick={() => toggleSource(key)} disabled={scanning}
-                            style={{
-                                fontSize: '0.72rem', fontWeight: 700, padding: '4px 10px', borderRadius: 20, cursor: 'pointer',
-                                border: `1px solid ${on ? meta.color : 'var(--border)'}`,
-                                background: on ? `${meta.color}22` : 'transparent',
-                                color: on ? meta.color : 'var(--text-muted)',
-                            }}>
-                            {meta.label}
-                        </button>
-                    );
-                })}
-            </div>
-
-            <button type="button" className="btn btn-primary" onClick={startScan} disabled={starting || scanning || !sources.length}
-                style={{ borderRadius: 12, padding: '0 24px', height: 46, minWidth: 200 }}>
-                {starting || scanning ? <div className="spinner" /> : '📡 Scan for my jobs'}
-            </button>
-
-            {error && <div className="alert alert-error" style={{ marginTop: 12, marginBottom: 0 }}>{error}</div>}
+            <fieldset className="mb-4">
+                <legend className="ui-label">Sources</legend>
+                <div className="flex flex-wrap gap-2">
+                    {Object.entries(SOURCE_META).map(([key, meta]) => {
+                        const on = sources.includes(key);
+                        return (
+                            <button
+                                key={key}
+                                type="button"
+                                onClick={() => toggleSource(key)}
+                                disabled={scanning}
+                                aria-pressed={on}
+                                className={cn(
+                                    'tap inline-flex min-h-9 items-center gap-1.5 rounded-full border px-3 text-xs font-semibold transition-colors duration-150 disabled:opacity-50',
+                                    on
+                                        ? 'border-brand/45 bg-brand/12 text-brand'
+                                        : 'border-white/10 bg-white/2 text-subtle hover:border-white/25',
+                                )}
+                            >
+                                {on && <Check className="size-3" aria-hidden="true" />}
+                                {meta.label}
+                            </button>
+                        );
+                    })}
+                </div>
+            </fieldset>
 
             {/* Scan progress */}
             {scan && (
-                <div style={{ marginTop: 14, padding: '12px 14px', background: 'var(--bg-secondary)', borderRadius: 12, border: '1px solid var(--border)' }}>
-                    <div style={{ fontSize: '0.78rem', fontWeight: 700, marginBottom: 8, color: scan.status === 'done' ? '#34d399' : scan.status === 'failed' ? '#f87171' : '#60a5fa' }}>
-                        {scan.status === 'running' ? '⏳ Scanning…' : scan.status === 'done' ? `✓ Scan complete — ${scan.totalFound} jobs found, ${scan.totalScored} scored` : `✕ Scan failed: ${scan.error || ''}`}
-                        {scan.roles?.length > 0 && <span style={{ color: 'var(--text-muted)', fontWeight: 500 }}> · roles: {scan.roles.join(', ')}</span>}
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                <div className="mb-4 rounded-xl border border-white/8 bg-white/2 p-3" aria-live="polite">
+                    <p
+                        className={cn(
+                            'mb-2 text-sm font-bold',
+                            scan.status === 'done' ? 'text-success' : scan.status === 'failed' ? 'text-danger' : 'text-info',
+                        )}
+                    >
+                        {scan.status === 'running'
+                            ? 'Scanning…'
+                            : scan.status === 'done'
+                                ? `Scan complete — ${scan.totalFound} found, ${scan.totalScored} scored`
+                                : `Scan failed: ${scan.error || 'unknown error'}`}
+                        {scan.roles?.length > 0 && (
+                            <span className="font-normal text-subtle"> · {scan.roles.join(', ')}</span>
+                        )}
+                    </p>
+
+                    <ul className="flex flex-wrap gap-1.5">
                         {(scan.sources || []).map((s) => {
-                            const meta = SOURCE_META[s.name] || { label: s.name, color: '#94a3b8' };
-                            const chipColor = s.status === 'done' ? '#34d399' : s.status === 'failed' ? '#f87171' : s.status === 'running' ? '#60a5fa' : 'var(--text-muted)';
+                            const meta = SOURCE_META[s.name] || { label: s.name };
+                            const tone =
+                                s.status === 'done' ? 'text-success' :
+                                s.status === 'failed' ? 'text-danger' :
+                                s.status === 'running' ? 'text-info' : 'text-subtle';
                             return (
-                                <span key={s.name} title={s.error || ''} style={{ fontSize: '0.7rem', fontWeight: 700, padding: '3px 9px', borderRadius: 20, border: `1px solid ${chipColor}`, color: chipColor }}>
-                                    {meta.label}: {s.status === 'done' ? s.found : s.status === 'failed' ? '✕' : s.status === 'running' ? '…' : '·'}
+                                <li
+                                    key={s.name}
+                                    className={cn('rounded-md bg-white/4 px-2 py-1 text-[0.7rem] font-semibold', tone)}
+                                    title={s.error || undefined}
+                                >
+                                    {meta.label}:{' '}
+                                    {s.status === 'done' ? s.found
+                                        : s.status === 'failed' ? 'failed'
+                                            : s.status === 'running' ? '…' : '·'}
                                     {s.name === 'council' && s.status === 'running' && scan.councilProgress?.total > 0 &&
                                         ` ${scan.councilProgress.done}/${scan.councilProgress.total}`}
-                                </span>
+                                </li>
                             );
                         })}
-                    </div>
+                    </ul>
+                </div>
+            )}
+
+            {/* Filter */}
+            {jobs.length > 0 && (
+                <div className="mb-3 flex items-center justify-between gap-3">
+                    <p className="text-sm text-subtle" data-numeric>{filtered.length} job(s)</p>
+                    <label className="flex items-center gap-2 text-sm">
+                        <span className="sr-only">Minimum match score</span>
+                        <Select
+                            value={minScore}
+                            onChange={(e) => setMinScore(Number(e.target.value))}
+                            className="min-h-9 w-auto py-1.5 text-sm"
+                        >
+                            <option value={0}>All scores</option>
+                            <option value={40}>Score ≥ 40</option>
+                            <option value={70}>Score ≥ 70</option>
+                        </Select>
+                    </label>
                 </div>
             )}
 
             {/* Results */}
-            {jobs.length > 0 && (
-                <div style={{ marginTop: 16 }}>
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10, flexWrap: 'wrap', gap: 8 }}>
-                        <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
-                            {jobs.length} jobs, best match first
-                        </div>
-                        <select value={minScore} onChange={(e) => setMinScore(Number(e.target.value))}
-                            style={{ background: 'var(--bg-secondary)', color: 'var(--text-secondary)', border: '1px solid var(--border)', borderRadius: 8, padding: '4px 8px', fontSize: '0.75rem' }}>
-                            <option value={0}>All scores</option>
-                            <option value={40}>Score ≥ 40</option>
-                            <option value={70}>Score ≥ 70</option>
-                        </select>
-                    </div>
+            {filtered.length === 0 ? (
+                <EmptyState
+                    icon={Radar}
+                    title={scan ? 'No matching jobs yet' : 'No scan run yet'}
+                    description={
+                        scan
+                            ? 'Try lowering the score filter or enabling more sources.'
+                            : 'Set target roles on your profile, then start a scan.'
+                    }
+                />
+            ) : (
+                <ul className="max-h-160 space-y-2 overflow-y-auto">
+                    {filtered.map((job) => {
+                        const meta = SOURCE_META[job.source] || { label: job.source };
+                        const busy = busyId === job._id;
+                        const isOpen = expanded === job._id;
 
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 560, overflowY: 'auto' }}>
-                        {jobs.map((job) => {
-                            const meta = SOURCE_META[job.source] || { label: job.source, color: '#94a3b8' };
-                            const busy = busyId === job._id;
-                            const isOpen = expanded === job._id;
-                            return (
-                                <div key={job._id} style={{ padding: '14px 16px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 12, display: 'flex', gap: 14, alignItems: 'flex-start', flexDirection: isExtension ? 'column' : 'row' }}>
-                                    <ScoreRing score={job.matchScore} />
+                        return (
+                            <li
+                                key={job._id}
+                                className={cn(
+                                    'flex gap-3 rounded-xl border border-white/8 bg-white/2 p-3',
+                                    isExtension ? 'flex-col' : 'flex-row items-start',
+                                )}
+                            >
+                                <ScoreRing score={job.matchScore} />
 
-                                    <div style={{ flex: 1, minWidth: 0 }}>
-                                        <div style={{ fontWeight: 700, fontSize: '0.92rem', color: 'var(--text-primary)', marginBottom: 3 }}>
-                                            {job.title}
-                                        </div>
-                                        <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-                                            <span>🏢 {job.company || 'Unknown'}</span>
-                                            <span>📍 {job.location}</span>
-                                            {fmtDate(job.postedAt) && <span>🕐 {fmtDate(job.postedAt)}</span>}
-                                            {fmtDate(job.closingDate) && <span style={{ color: '#fbbf24' }}>⏳ closes {fmtDate(job.closingDate)}</span>}
-                                            <span style={{ fontSize: '0.65rem', fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: `${meta.color}22`, color: meta.color }}>
-                                                {job.sourceDetail && job.source === 'jsearch' ? job.sourceDetail.toUpperCase() : meta.label.toUpperCase()}
+                                <div className="min-w-0 flex-1">
+                                    <p className="font-bold leading-snug">{job.title}</p>
+
+                                    <p className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-subtle">
+                                        <span className="inline-flex items-center gap-1">
+                                            <Building2 className="size-3" aria-hidden="true" />
+                                            {job.company || 'Unknown'}
+                                        </span>
+                                        <span className="inline-flex items-center gap-1">
+                                            <MapPin className="size-3" aria-hidden="true" />
+                                            {job.location}
+                                        </span>
+                                        {fmtDate(job.postedAt) && (
+                                            <span className="inline-flex items-center gap-1">
+                                                <Clock className="size-3" aria-hidden="true" />
+                                                {fmtDate(job.postedAt)}
                                             </span>
-                                            {job.visaSponsor && (
-                                                <span style={{ fontSize: '0.65rem', fontWeight: 700, padding: '2px 8px', borderRadius: 20, background: 'rgba(52,211,153,0.15)', color: '#34d399' }}>
-                                                    VISA SPONSOR
-                                                </span>
-                                            )}
-                                            {job.status === 'shortlisted' && <span style={{ color: '#fbbf24' }}>★</span>}
-                                            {job.status === 'in_pipeline' && <span style={{ color: '#34d399', fontSize: '0.7rem', fontWeight: 700 }}>IN PIPELINE</span>}
-                                        </div>
-
-                                        {(job.matchedSkills?.length > 0 || job.missingSkills?.length > 0) && (
-                                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 6 }}>
-                                                {(job.matchedSkills || []).map((s) => (
-                                                    <span key={s} style={{ fontSize: '0.65rem', padding: '2px 7px', borderRadius: 16, background: 'rgba(52,211,153,0.12)', color: '#34d399' }}>✓ {s}</span>
-                                                ))}
-                                                {(job.missingSkills || []).map((s) => (
-                                                    <span key={s} style={{ fontSize: '0.65rem', padding: '2px 7px', borderRadius: 16, background: 'rgba(248,113,113,0.1)', color: '#f87171' }}>– {s}</span>
-                                                ))}
-                                            </div>
                                         )}
-
-                                        {job.matchSummary && (
-                                            <div style={{ fontSize: '0.74rem', color: 'var(--text-muted)', marginTop: 5, fontStyle: 'italic' }}>{job.matchSummary}</div>
+                                        {fmtDate(job.closingDate) && (
+                                            <span className="inline-flex items-center gap-1 text-warning">
+                                                <CalendarClock className="size-3" aria-hidden="true" />
+                                                closes {fmtDate(job.closingDate)}
+                                            </span>
                                         )}
+                                    </p>
 
-                                        {job.description && (
-                                            <>
-                                                <button type="button" onClick={() => setExpanded(isOpen ? '' : job._id)}
-                                                    style={{ background: 'none', border: 'none', color: '#60a5fa', fontSize: '0.72rem', cursor: 'pointer', padding: 0, marginTop: 5 }}>
-                                                    {isOpen ? '▲ Hide details' : '▼ Job details'}
-                                                </button>
-                                                {isOpen && (
-                                                    <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)', marginTop: 6, whiteSpace: 'pre-wrap', maxHeight: 200, overflowY: 'auto' }}>
-                                                        {job.description.slice(0, 2500)}
-                                                    </div>
-                                                )}
-                                            </>
+                                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                                        <Badge tone="neutral">
+                                            {job.sourceDetail && job.source === 'jsearch' ? job.sourceDetail : meta.label}
+                                        </Badge>
+                                        {job.visaSponsor && (
+                                            <Badge tone="info" icon={ShieldCheck}>Sponsor</Badge>
                                         )}
+                                        {job.status === 'shortlisted' && <Badge tone="warning" icon={Star}>Shortlisted</Badge>}
+                                        {job.status === 'in_pipeline' && <Badge tone="success">In pipeline</Badge>}
                                     </div>
 
-                                    <div style={{ display: 'flex', gap: 6, flexShrink: 0, flexDirection: isExtension ? 'row' : 'column' }}>
-                                        {job.status !== 'in_pipeline' && (
-                                            <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => jobAction(job, 'apply')} style={{ whiteSpace: 'nowrap' }}>
-                                                {busy ? <div className="spinner" /> : '↗ Apply Now'}
+                                    {(job.matchedSkills?.length > 0 || job.missingSkills?.length > 0) && (
+                                        <div className="mt-2">
+                                            <button
+                                                type="button"
+                                                onClick={() => setExpanded(isOpen ? '' : job._id)}
+                                                aria-expanded={isOpen}
+                                                className="tap rounded text-xs font-semibold text-brand"
+                                            >
+                                                {isOpen ? 'Hide match detail' : 'Why this match?'}
                                             </button>
-                                        )}
-                                        {job.status === 'new' && (
-                                            <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => jobAction(job, 'shortlist')}>☆</button>
-                                        )}
-                                        <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => jobAction(job, 'dismiss')}>✕</button>
+                                            {isOpen && (
+                                                <div className="mt-2 space-y-2 rounded-lg bg-white/3 p-2.5">
+                                                    {job.matchSummary && <p className="text-xs text-muted">{job.matchSummary}</p>}
+                                                    {job.matchedSkills?.length > 0 && (
+                                                        <p className="text-xs">
+                                                            <span className="font-bold text-success">Has: </span>
+                                                            <span className="text-muted">{job.matchedSkills.join(', ')}</span>
+                                                        </p>
+                                                    )}
+                                                    {job.missingSkills?.length > 0 && (
+                                                        <p className="text-xs">
+                                                            <span className="font-bold text-warning">Missing: </span>
+                                                            <span className="text-muted">{job.missingSkills.join(', ')}</span>
+                                                        </p>
+                                                    )}
+                                                </div>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    <div className="mt-3 flex flex-wrap gap-2">
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            disabled={busy || job.status === 'in_pipeline'}
+                                            loading={busy}
+                                            onClick={() => jobAction(job, 'apply')}
+                                        >
+                                            {!busy && <ExternalLink className="size-3.5" aria-hidden="true" />}
+                                            Apply now
+                                        </Button>
+                                        <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => jobAction(job, 'shortlist')}>
+                                            <Star className="size-3.5" aria-hidden="true" />
+                                            <span className="sr-only sm:not-sr-only">Shortlist</span>
+                                        </Button>
+                                        <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => jobAction(job, 'dismiss')}>
+                                            <X className="size-3.5" aria-hidden="true" />
+                                            <span className="sr-only sm:not-sr-only">Dismiss</span>
+                                        </Button>
                                     </div>
                                 </div>
-                            );
-                        })}
-                    </div>
-                </div>
+                            </li>
+                        );
+                    })}
+                </ul>
             )}
-        </div>
+        </Card>
     );
 }

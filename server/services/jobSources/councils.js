@@ -2,16 +2,17 @@ import 'dotenv/config';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
 import crypto from 'crypto';
-import Groq from 'groq-sdk';
 
 import { UK_COUNCILS } from '../../data/ukCouncils.js';
 import JobSearchCache from '../../models/JobSearchCache.js';
+import { CACHE_TTL_SECONDS } from '../../models/JobSearchCache.js';
 import { fetchJobPage } from '../scrape.js';
+import { chatJson } from '../llm.js';
 import { BROWSER_UA, getScrapeBrowser, sleep } from './shared.js';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-const CACHE_TTL_MS = 12 * 60 * 60 * 1000;
+// Must not exceed the collection's TTL index, or the "cached" branch below can
+// never be reached — Mongo would have deleted the document first.
+const CACHE_TTL_MS = CACHE_TTL_SECONDS * 1000;
 const CAREERS_HREF = /job|career|vacanc|work[-\s]?for[-\s]?us|recruit/i;
 
 /**
@@ -137,16 +138,9 @@ async function fetchWithSearchClick(url) {
 
 /** LLM-parse a careers page's text into job listings. */
 async function extractListings(pageText, councilName, careersUrl) {
-    const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-            {
-                role: 'system',
-                content: 'You extract job vacancy listings from raw scraped council careers-page text. Return only JSON. Never invent listings — if the page shows no concrete vacancies, return an empty array.',
-            },
-            {
-                role: 'user',
-                content: `Council: ${councilName}
+    const parsed = await chatJson({
+        system: 'You extract job vacancy listings from raw scraped council careers-page text. Never invent listings — if the page shows no concrete vacancies, return an empty array.',
+        user: `Council: ${councilName}
 Careers page URL: ${careersUrl}
 
 Raw page text:
@@ -154,15 +148,35 @@ Raw page text:
 ${String(pageText).slice(0, 7000)}
 """
 
-Return JSON: { "listings": [{ "title": "", "location": "", "salary": "", "closingDate": "YYYY-MM-DD or empty", "url": "absolute or relative link if visible, else empty" }] }
-Max 15 listings. Only include actual job vacancies (not category pages, news, or "sign up for alerts").`,
+Max 15 listings. Only include actual job vacancies — not category pages, news items, "sign up for alerts", or generic "work for us" blurbs.
+Use an empty string for any field the page does not state.`,
+        schema: {
+            type: 'object',
+            properties: {
+                listings: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            title: { type: 'string' },
+                            location: { type: 'string' },
+                            salary: { type: 'string' },
+                            closingDate: { type: 'string', description: 'YYYY-MM-DD or empty string' },
+                            url: { type: 'string', description: 'Absolute or relative link if visible, else empty string' },
+                        },
+                        required: ['title', 'location', 'salary', 'closingDate', 'url'],
+                        additionalProperties: false,
+                    },
+                },
             },
-        ],
-        response_format: { type: 'json_object' },
-        max_tokens: 2000,
+            required: ['listings'],
+            additionalProperties: false,
+        },
+        schemaName: 'council_listings',
+        maxTokens: 2000,
+        label: 'council-listings',
     });
 
-    const parsed = JSON.parse(completion.choices[0].message.content);
     return Array.isArray(parsed.listings) ? parsed.listings : [];
 }
 

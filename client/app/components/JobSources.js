@@ -1,18 +1,22 @@
 'use client';
-import { useState, useRef } from 'react';
 
-const BADGE = {
-    open: { label: 'Open', bg: 'rgba(52,211,153,0.15)', color: '#34d399' },
-    closed: { label: 'Closed', bg: 'rgba(248,113,113,0.15)', color: '#f87171' },
-    unreachable: { label: 'Unverified', bg: 'rgba(251,191,36,0.15)', color: '#fbbf24' },
-    unknown: { label: 'Unknown', bg: 'rgba(148,163,184,0.15)', color: '#94a3b8' },
+import { useState, useRef } from 'react';
+import { ExternalLink, FileUp, Inbox, Paperclip, X } from 'lucide-react';
+import { Alert, Badge, Button, Card, CardTitle, Textarea, cn } from './ui';
+import { apiPost } from '@/lib/api';
+
+const VALIDATION = {
+    open: { label: 'Open', tone: 'success' },
+    closed: { label: 'Closed', tone: 'danger' },
+    unreachable: { label: 'Unverified', tone: 'warning' },
+    unknown: { label: 'Unknown', tone: 'neutral' },
 };
 
 /**
  * Ingestion panel: paste job links or a JD, or drop a document of links.
  * Each ingested job becomes an application the user can Apply Now on.
  */
-export default function JobSources({ apiBase, userEmail, isExtension, onApplicationChange }) {
+export default function JobSources({ userEmail, isExtension, onApplicationChange }) {
     const [text, setText] = useState('');
     const [file, setFile] = useState(null);
     const [busy, setBusy] = useState(false);
@@ -21,16 +25,7 @@ export default function JobSources({ apiBase, userEmail, isExtension, onApplicat
     const [applyingId, setApplyingId] = useState('');
     const fileRef = useRef(null);
 
-    async function post(path, body) {
-        const res = await fetch(`${apiBase}${path}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(body),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.message || 'Request failed');
-        return data;
-    }
+    const post = (path, body) => apiPost(path, body);
 
     async function ingest() {
         if (!userEmail) { setError('Sign in first.'); return; }
@@ -40,14 +35,10 @@ export default function JobSources({ apiBase, userEmail, isExtension, onApplicat
         setError('');
         try {
             const form = new FormData();
-            form.append('userEmail', userEmail);
             if (text.trim()) form.append('text', text.trim());
             if (file) form.append('document', file);
 
-            const res = await fetch(`${apiBase}/api/job-sources/ingest`, { method: 'POST', body: form });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.message || 'Ingest failed');
-
+            const data = await apiPost('/api/job-sources/ingest', form);
             setJobs(data.applications || []);
             if (data.errors?.length) {
                 setError(`${data.errors.length} link(s) could not be read: ${data.errors[0].error}`);
@@ -88,88 +79,118 @@ export default function JobSources({ apiBase, userEmail, isExtension, onApplicat
     }
 
     return (
-        <div className="form-group" style={{ marginBottom: 32, padding: 24, background: 'rgba(168,85,247,0.04)', borderRadius: 20, border: '1px solid rgba(168,85,247,0.15)', position: 'relative' }}>
-            <div style={{ position: 'absolute', top: 0, left: 0, width: 4, height: '100%', background: '#a855f7' }} />
-
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
-                <label style={{ color: '#a855f7', display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
-                    📥 Job Sources
-                </label>
-                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', fontWeight: 600 }}>
-                    Paste links or a JD → the agent scrapes & validates each one
-                </div>
-            </div>
-
-            <textarea
-                placeholder={'Paste job links (one per line) — or paste a full job description…'}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                style={{ width: '100%', background: 'var(--bg-secondary)', border: '1px solid var(--border)', color: 'white', borderRadius: 12, padding: '14px 18px', fontSize: '0.95rem', minHeight: 90, resize: 'vertical' }}
+        <Card className="mb-4">
+            <CardTitle
+                icon={Inbox}
+                accent="info"
+                title="Add jobs"
+                description="Paste links or a description, or drop in a document."
             />
 
-            <div style={{ display: 'flex', gap: 12, marginTop: 12, flexDirection: isExtension ? 'column' : 'row', alignItems: isExtension ? 'stretch' : 'center' }}>
-                <input
-                    ref={fileRef}
-                    type="file"
-                    accept=".pdf,.docx,.txt,.csv"
-                    onChange={(e) => setFile(e.target.files?.[0] || null)}
-                    style={{ flex: 1, fontSize: '0.85rem', color: 'var(--text-secondary)' }}
-                />
-                <button type="button" onClick={ingest} disabled={busy} className="btn btn-primary" style={{ borderRadius: 12, padding: '0 24px', minWidth: 160, height: 48 }}>
-                    {busy ? <div className="spinner" /> : '🤖 Ingest Jobs'}
-                </button>
+            <Textarea
+                aria-label="Job links or description"
+                placeholder="Paste job links, one per line — or a full job description…"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                className="min-h-24"
+            />
+
+            <div className={cn('mt-3 flex gap-3', isExtension ? 'flex-col' : 'flex-col sm:flex-row sm:items-center')}>
+                {/* The native file input is visually replaced by a labelled drop
+                    target — the default control is unstyleable and reads poorly
+                    on mobile — while staying a real <input> for accessibility. */}
+                <div className="min-w-0 flex-1">
+                    <input
+                        ref={fileRef}
+                        id="job-doc"
+                        type="file"
+                        accept=".pdf,.txt,.csv,.docx"
+                        onChange={(e) => setFile(e.target.files?.[0] || null)}
+                        className="sr-only"
+                    />
+                    <label
+                        htmlFor="job-doc"
+                        className="tap flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-dashed border-white/15 bg-white/2 px-3 text-sm text-subtle transition-colors hover:border-brand/40 hover:text-text"
+                    >
+                        <Paperclip className="size-4 shrink-0" aria-hidden="true" />
+                        <span className="min-w-0 flex-1 truncate">
+                            {file ? file.name : 'Attach a PDF, DOCX, TXT or CSV'}
+                        </span>
+                        {file && (
+                            <button
+                                type="button"
+                                onClick={(e) => {
+                                    e.preventDefault();
+                                    setFile(null);
+                                    if (fileRef.current) fileRef.current.value = '';
+                                }}
+                                aria-label="Remove attached file"
+                                className="tap shrink-0 rounded p-1 hover:text-danger"
+                            >
+                                <X className="size-3.5" aria-hidden="true" />
+                            </button>
+                        )}
+                    </label>
+                </div>
+
+                <Button type="button" onClick={ingest} disabled={busy} loading={busy} className="shrink-0">
+                    {!busy && <FileUp className="size-4" aria-hidden="true" />}
+                    Ingest jobs
+                </Button>
             </div>
 
-            {error && <div className="alert alert-error" style={{ marginTop: 12, marginBottom: 0 }}>{error}</div>}
+            {error && <Alert tone="danger" className="mt-3">{error}</Alert>}
 
             {jobs.length > 0 && (
-                <div style={{ marginTop: 16, display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 420, overflowY: 'auto' }}>
+                <ul className="mt-4 max-h-104 space-y-2 overflow-y-auto">
                     {jobs.map((job) => {
-                        const badge = BADGE[job.validation?.status] || BADGE.unknown;
+                        const badge = VALIDATION[job.validation?.status] || VALIDATION.unknown;
                         const busyThis = applyingId === job._id;
                         return (
-                            <div key={job._id} style={{ padding: '14px 16px', background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 12, display: 'flex', justifyContent: 'space-between', gap: 12, flexDirection: isExtension ? 'column' : 'row', alignItems: isExtension ? 'stretch' : 'center' }}>
-                                <div style={{ minWidth: 0 }}>
-                                    <div style={{ fontWeight: 700, fontSize: '0.92rem', color: 'var(--text-primary)', marginBottom: 3 }}>
-                                        {job.jobTitle || 'Untitled role'}
-                                    </div>
-                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', flexWrap: 'wrap', gap: 10, alignItems: 'center' }}>
-                                        <span>🏢 {job.companyName || 'Unknown'}</span>
-                                        {job.location && <span>📍 {job.location}</span>}
-                                        <span style={{ fontSize: '0.65rem', padding: '2px 8px', borderRadius: 20, fontWeight: 700, background: badge.bg, color: badge.color }}>
-                                            {badge.label}
-                                        </span>
-                                        <span style={{ fontSize: '0.65rem', padding: '2px 8px', borderRadius: 20, fontWeight: 700, background: 'rgba(148,163,184,0.15)', color: '#94a3b8' }}>
-                                            {job.applyMethod === 'direct' ? 'DIRECT APPLY' : 'EXTERNAL'}
-                                        </span>
-                                    </div>
-                                    {job.validation?.reason && (
-                                        <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)', marginTop: 4 }}>{job.validation.reason}</div>
-                                    )}
+                            <li
+                                key={job._id}
+                                className={cn(
+                                    'flex gap-3 rounded-xl border border-white/8 bg-white/2 p-3',
+                                    isExtension ? 'flex-col' : 'flex-col sm:flex-row sm:items-center sm:justify-between',
+                                )}
+                            >
+                                <div className="min-w-0">
+                                    <p className="truncate text-sm font-bold">{job.jobTitle || 'Untitled role'}</p>
+                                    <p className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-subtle">
+                                        <span className="truncate">{job.companyName || 'Unknown company'}</span>
+                                        <Badge tone={badge.tone}>{badge.label}</Badge>
+                                    </p>
                                 </div>
 
-                                <div style={{ display: 'flex', gap: 8, flexShrink: 0, alignItems: 'center', flexWrap: 'wrap' }}>
+                                <div className="flex shrink-0 flex-wrap gap-2">
                                     {job.status === 'applying' ? (
                                         <>
-                                            <span style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>Finished applying?</span>
-                                            <button type="button" className="btn btn-primary btn-sm" disabled={busyThis} onClick={() => decide(job, 'approve')}>✓ Approve</button>
-                                            <button type="button" className="btn btn-secondary btn-sm" disabled={busyThis} onClick={() => decide(job, 'deny')}>✕ Deny</button>
+                                            <Button type="button" size="sm" disabled={busyThis} onClick={() => decide(job, 'approve')}>
+                                                Approve
+                                            </Button>
+                                            <Button type="button" size="sm" variant="ghost" disabled={busyThis} onClick={() => decide(job, 'deny')}>
+                                                Deny
+                                            </Button>
                                         </>
-                                    ) : job.status === 'denied' ? (
-                                        <span style={{ fontSize: '0.78rem', fontWeight: 700, color: 'var(--text-muted)' }}>✕ Denied</span>
-                                    ) : job.status === 'ready' ? (
-                                        <button type="button" className="btn btn-primary btn-sm" disabled={busyThis || !job.applyUrl} onClick={() => applyNow(job)} style={{ whiteSpace: 'nowrap' }}>
-                                            {busyThis ? <div className="spinner" /> : '↗ Apply Now'}
-                                        </button>
                                     ) : (
-                                        <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#34d399' }}>✓ In pipeline</span>
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="secondary"
+                                            disabled={busyThis || !job.applyUrl}
+                                            loading={busyThis}
+                                            onClick={() => applyNow(job)}
+                                        >
+                                            {!busyThis && <ExternalLink className="size-3.5" aria-hidden="true" />}
+                                            Apply now
+                                        </Button>
                                     )}
                                 </div>
-                            </div>
+                            </li>
                         );
                     })}
-                </div>
+                </ul>
             )}
-        </div>
+        </Card>
     );
 }

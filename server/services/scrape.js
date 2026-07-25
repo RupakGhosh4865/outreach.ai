@@ -1,9 +1,7 @@
 import 'dotenv/config';
 import axios from 'axios';
 import * as cheerio from 'cheerio';
-import Groq from 'groq-sdk';
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+import { chatJson } from './llm.js';
 
 const BROWSER_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -68,44 +66,45 @@ export async function fetchJobPage(url) {
 /**
  * Turn raw job-page text into a structured, validated job record in one LLM call.
  */
-export async function classifyJob({ rawText, url = '' }) {
-    const systemPrompt = 'You are a job-posting analyst. You read raw scraped text from a job page and return structured JSON. Never invent details that are not in the text.';
+const JOB_SCHEMA = {
+    type: 'object',
+    properties: {
+        jobTitle: { type: 'string' },
+        companyName: { type: 'string' },
+        location: { type: 'string' },
+        jobDescription: {
+            type: 'string',
+            description: 'Concise summary of the role, responsibilities and requirements. Max 1200 characters.',
+        },
+        applyMethod: { type: 'string', enum: ['direct', 'external'] },
+        isOpen: { type: 'boolean' },
+        closingDate: { type: 'string', description: 'YYYY-MM-DD, or an empty string if not stated.' },
+        reason: { type: 'string', description: 'One short sentence explaining the isOpen verdict.' },
+    },
+    required: ['jobTitle', 'companyName', 'location', 'jobDescription', 'applyMethod', 'isOpen', 'closingDate', 'reason'],
+    additionalProperties: false,
+};
 
-    const userPrompt = `Source URL: ${url || '(pasted text)'}
+export async function classifyJob({ rawText, url = '' }) {
+    const parsed = await chatJson({
+        system: 'You read raw scraped text from a job page and extract what is actually there. You never invent details the text does not contain — an empty string is always better than a guess.',
+        user: `Source URL: ${url || '(pasted text)'}
 
 Raw page text:
 """
 ${String(rawText).slice(0, 6000)}
 """
 
-Return JSON with exactly these fields:
-{
-  "jobTitle": "",
-  "companyName": "",
-  "location": "",
-  "jobDescription": "concise summary of the role, responsibilities and requirements, max 1200 chars",
-  "applyMethod": "direct" | "external",
-  "isOpen": true | false,
-  "closingDate": "YYYY-MM-DD or empty string",
-  "reason": "one short sentence explaining the isOpen verdict"
-}
-
 Rules:
 - applyMethod is "direct" if the page hosts its own application form; "external" if it links out to another site (LinkedIn, Indeed, an ATS, a company careers page).
 - isOpen is false only if the text says the role is closed, filled, expired, or no longer accepting applications, or closingDate has passed. Otherwise true.
-- Use empty strings for anything you cannot find. Return ONLY the JSON object.`;
-
-    const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-        ],
-        response_format: { type: 'json_object' },
-        max_tokens: 1200,
+- Use empty strings for anything you cannot find.`,
+        schema: JOB_SCHEMA,
+        schemaName: 'job_posting',
+        maxTokens: 1200,
+        label: 'classify-job',
     });
 
-    const parsed = JSON.parse(completion.choices[0].message.content);
     return {
         jobTitle: parsed.jobTitle || '',
         companyName: parsed.companyName || '',

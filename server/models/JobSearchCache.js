@@ -16,12 +16,18 @@ const jobResultSchema = new mongoose.Schema({
     description: String,
 }, { _id: false });
 
+/**
+ * TTL for every cached search, exported so callers can't set a staleness window
+ * longer than the window Mongo will actually keep the document for.
+ */
+export const CACHE_TTL_SECONDS = 12 * 60 * 60; // 12h
+
 const jobSearchCacheSchema = new mongoose.Schema({
     queryHash: { type: String, index: true, unique: true },
     role: String,
     keywords: [String],
     results: [jobResultSchema],
-    createdAt: { type: Date, default: Date.now, expires: 21600 }, // 6h TTL
+    createdAt: { type: Date, default: Date.now, expires: CACHE_TTL_SECONDS },
 });
 
 export default mongoose.model('JobSearchCache', jobSearchCacheSchema);

@@ -1,7 +1,5 @@
 import 'dotenv/config';
-import Groq from 'groq-sdk';
-
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+import { chatJson, MODELS } from './llm.js';
 
 const TYPE_MAP = {
     referral: 'a referral request for a job opening',
@@ -57,6 +55,22 @@ export function stripAttachmentClaim(body) {
         .trim();
 }
 
+const EMAIL_SCHEMA = {
+    type: 'object',
+    properties: {
+        subject: {
+            type: 'string',
+            description: 'Specific, non-generic subject line under 65 characters. No "Job Application" boilerplate.',
+        },
+        body: {
+            type: 'string',
+            description: 'The email body as plain text with blank lines between paragraphs. No subject line, no signature block of labelled links.',
+        },
+    },
+    required: ['subject', 'body'],
+    additionalProperties: false,
+};
+
 /**
  * Generate one personalised outreach email. The links block is appended in code
  * (see applyLinksBlock) rather than trusted to the model.
@@ -70,7 +84,12 @@ export async function buildEmailVariant({
         ? links.map((l) => `- ${l.label}: ${l.url}`).join('\n')
         : '- (the sender has not provided any links)';
 
-    const systemPrompt = 'You are a professional career coach and expert at writing high-conversion job outreach emails.';
+    const systemPrompt = [
+        'You write job outreach emails that get replies.',
+        'You write like a competent person emailing a stranger they respect: specific, brief, and easy to say yes to.',
+        'You never invent experience, employers, metrics or links that are not in the material you are given.',
+        'If the resume is thin or missing, you write a shorter email rather than padding it with generic claims.',
+    ].join(' ');
 
     const userPrompt = `Context:
 - Role: ${jobTitle || 'Not specified'}
@@ -94,40 +113,39 @@ Sender Resume (extracted text):
 ${resumeText ? resumeText.slice(0, 2000) : 'Not provided'}
 
 TASK:
-Write a high-quality, professional, personalized outreach email.
+Write one personalised outreach email.
 
 STRUCTURE:
-1. Short, engaging opening (NO "I hope this email finds you well").
-2. Core value proposition: 1-2 sentences on why the sender fits the ${jobTitle || 'role'}.
-3. Proof of work: 2 bullet points with specific achievements from the resume.
-4. Weave in the available links above as evidence, only where one exists.
-5. Clear, respectful call to action (a chat or a referral).
-${hasAttachment ? '6. Mention that the resume is attached for review.' : '6. Do NOT claim any file is attached — no resume is being attached to this email.'}
+1. One opening line that shows you know what this company or role actually is. Never "I hope this email finds you well".
+2. One or two sentences on why the sender fits the ${jobTitle || 'role'} — tied to the job description, not generic.
+3. Two bullet points of concrete proof, taken from the resume text above. Prefer bullets with a measurable result. If the resume gives you nothing concrete, use one bullet, not two invented ones.
+4. Reference the sender's links as evidence only where one is listed above.
+5. A specific, low-effort call to action — a 15-minute chat or a referral. Give the recipient an easy out.
+${hasAttachment ? '6. Mention in passing that the resume is attached.' : '6. Do NOT claim any file is attached — no resume is being attached to this email.'}
 
-FORMATTING RULES:
-- Plain text with blank lines between paragraphs; a bulleted list for achievements.
-- Tone: professional, respectful, confident. Max 220 words.
-- Do NOT end with a list of labelled links (LinkedIn:/GitHub:/Portfolio:/Resume:) — that block is added separately.
+RULES:
+- Under 200 words. Shorter is better than padded.
+- Plain text. Blank lines between paragraphs, "- " for the bullets.
+- Confident and direct. No "I am writing to", no "I would be grateful for the opportunity", no adjective stacking.
+- Every claim must trace back to the resume or profile above.
+- Do NOT end with labelled links (LinkedIn:/GitHub:/Portfolio:/Resume:) — that block is appended separately.
+- The subject must be specific to ${jobTitle || companyName || 'the role'} and under 65 characters.`;
 
-Subject Line Rules:
-- Start the response with exactly "Subject: " followed by a catchy subject relevant to ${jobTitle || companyName || 'the role'}.`;
-
-    const res = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-            { role: 'system', content: systemPrompt },
-            { role: 'user', content: userPrompt },
-        ],
-        max_tokens: 1024,
+    const { subject: rawSubject, body: rawBody } = await chatJson({
+        system: systemPrompt,
+        user: userPrompt,
+        schema: EMAIL_SCHEMA,
+        schemaName: 'outreach_email',
+        model: MODELS.quality,
+        maxTokens: 1200,
+        temperature: 0.7,
+        label: 'email',
     });
 
-    const raw = res.choices[0].message.content;
-    const subjectMatch = raw.match(/^Subject:\s*(.+)/im);
-    const subject = subjectMatch
-        ? subjectMatch[1].trim()
-        : `${emailType === 'referral' ? 'Referral Request' : 'Application'} – ${jobTitle || companyName}`;
+    const subject = String(rawSubject || '').trim()
+        || `${emailType === 'referral' ? 'Referral request' : 'Application'} – ${jobTitle || companyName}`;
 
-    let body = raw.replace(/^Subject:.+\n?/im, '').trim();
+    let body = String(rawBody || '').trim();
     if (!hasAttachment) body = stripAttachmentClaim(body);
     body = applyLinksBlock(body, profile);
 

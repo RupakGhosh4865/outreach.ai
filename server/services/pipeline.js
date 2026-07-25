@@ -3,13 +3,19 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 
 import JobApplication from '../models/JobApplication.js';
-import UserProfile from '../models/UserProfile.js';
 import JobRequest from '../models/JobRequest.js';
 import { transition, startStep, finishStep, resetStepsFrom } from './applicationFsm.js';
 import { buildOptimizedResume, parseResume } from './resume.js';
 import { findContactsForCompany } from './contacts.js';
 import { buildEmailVariant } from './emailComposer.js';
-import { getTransporter, attachResume, sendToRecipients } from './mailer.js';
+import {
+    attachResume,
+    sendToRecipients,
+    getTransporterFor,
+    senderIdentity,
+    loadProfileForSending,
+} from './mailer.js';
+import { acquireLock, releaseLock, isLocked } from './lock.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,8 +30,11 @@ const PLAN_LIMITS = {
     team: { campaigns: 99999, emails: 999 },
 };
 
-// One run per application at a time — a double-click on Approve must not start two pipelines.
-const running = new Map(); // appId -> Promise
+// One run per application at a time — a double-click on Approve must not start
+// two pipelines. The lock lives in Mongo so this holds across replicas too; the
+// local map additionally lets a caller await an in-process run.
+const localRuns = new Map(); // appId -> Promise
+const lockKey = (appId) => `pipeline:${appId}`;
 
 class StepError extends Error {
     constructor(step, message) {
@@ -159,8 +168,8 @@ async function stepSendEmail(app, profile) {
         });
 
         const { sentTo, errors } = await sendToRecipients({
-            transporter: getTransporter(),
-            from: `"${profile?.name || app.userEmail}" <${process.env.GMAIL_USER}>`,
+            transporter: await getTransporterFor(profile),
+            from: senderIdentity(profile, app.userEmail),
             recipients,
             subject: app.email?.subject,
             body,
@@ -229,7 +238,7 @@ const STEP_ORDER = ['generate_cv', 'find_contacts', 'generate_email', 'send_emai
 async function execute(appId, fromStep) {
     const app = await JobApplication.findById(appId);
     if (!app) throw new Error('Application not found.');
-    const profile = await UserProfile.findOne({ email: app.userEmail });
+    const profile = await loadProfileForSending(app.userEmail);
 
     const startIndex = STEP_ORDER.indexOf(fromStep);
     const steps = startIndex >= 0 ? STEP_ORDER.slice(startIndex) : STEP_ORDER;
@@ -255,18 +264,28 @@ async function execute(appId, fromStep) {
 
 /**
  * Run the post-approval pipeline for an application. Safe to call twice — the
- * second call joins the in-flight run instead of starting a competing one.
+ * second call joins the in-flight run instead of starting a competing one, and
+ * a call on another replica is refused by the lock.
  */
-export function runPipeline(appId, { fromStep = 'generate_cv' } = {}) {
+export async function runPipeline(appId, { fromStep = 'generate_cv' } = {}) {
     const key = String(appId);
-    if (running.has(key)) return running.get(key);
+    if (localRuns.has(key)) return localRuns.get(key);
 
-    const promise = execute(key, fromStep).finally(() => running.delete(key));
-    running.set(key, promise);
+    // 30 minutes covers the slowest realistic run (CV render + contacts + email).
+    if (!(await acquireLock(lockKey(key), { ttlMs: 30 * 60 * 1000 }))) {
+        return { ok: false, error: 'This application is already being processed.' };
+    }
+
+    const promise = execute(key, fromStep).finally(async () => {
+        localRuns.delete(key);
+        await releaseLock(lockKey(key));
+    });
+    localRuns.set(key, promise);
     return promise;
 }
 
-export const isRunning = (appId) => running.has(String(appId));
+export const isRunning = async (appId) =>
+    localRuns.has(String(appId)) || isLocked(lockKey(String(appId)));
 
 /** Retry a failed step and everything after it. */
 export async function retryFrom(app, stepName) {
@@ -287,7 +306,7 @@ export async function retryFrom(app, stepName) {
 
 /** Send an application that is paused at "email drafted" (the Review & Send action). */
 export async function sendDraft(app, { subject, body, recipients } = {}) {
-    const profile = await UserProfile.findOne({ email: app.userEmail });
+    const profile = await loadProfileForSending(app.userEmail);
 
     if (subject || body || recipients) {
         app.email = {

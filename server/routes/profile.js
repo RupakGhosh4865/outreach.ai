@@ -6,11 +6,14 @@ import axios from 'axios';
 import FormData from 'form-data';
 import { fileURLToPath } from 'url';
 import UserProfile from '../models/UserProfile.js';
+import { requireAuth, currentEmail } from '../middleware/auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
+
+router.use(requireAuth);
 const RESUME_OPTIMIZER_URL = process.env.RESUME_OPTIMIZER_URL || 'http://localhost:8002';
 
 // Ensure uploads/ directory exists
@@ -58,8 +61,13 @@ const uploadFields = upload.fields([
 // POST /api/profile
 router.post('/', uploadFields, async (req, res) => {
     try {
-        const { name, email, linkedinUrl, githubUrl, portfolioUrl, resumeLink, techStack, experienceYears, experienceMonths, targetRoles } = req.body;
-        if (!name || !email) return res.status(400).json({ message: 'Name and email are required.' });
+        const { name, linkedinUrl, githubUrl, portfolioUrl, resumeLink, techStack, experienceYears, experienceMonths, targetRoles } = req.body;
+
+        // The account is whoever the token says it is. Taking `email` from the
+        // body let any caller overwrite any other user's profile — and the UI
+        // exposed the field for editing.
+        const email = currentEmail(req);
+        if (!name) return res.status(400).json({ message: 'Name is required.' });
 
         // The optimizer parses these two slots as PDFs, so reject other formats up front
         // rather than letting the sync fail later with a confusing error.
@@ -116,6 +124,8 @@ router.post('/', uploadFields, async (req, res) => {
         if (srcGenai || srcBackend) {
             try {
                 const fd = new FormData();
+                // Scopes these defaults to one account in the optimizer's store.
+                fd.append('user_email', profile.email);
                 if (srcGenai)   fd.append('resume_genai',   fs.createReadStream(srcGenai.path),   { filename: srcGenai.originalname,   contentType: contentTypeFor(srcGenai) });
                 if (srcBackend) fd.append('resume_backend',  fs.createReadStream(srcBackend.path),  { filename: srcBackend.originalname,  contentType: contentTypeFor(srcBackend) });
                 await axios.post(`${RESUME_OPTIMIZER_URL}/api/save-defaults`, fd, { headers: fd.getHeaders(), timeout: 20000 });
@@ -144,11 +154,10 @@ router.post('/', uploadFields, async (req, res) => {
     }
 });
 
-// GET /api/profile?email=xxx
+// GET /api/profile — always the authenticated user's own profile
 router.get('/', async (req, res) => {
     try {
-        const { email } = req.query;
-        if (!email) return res.status(400).json({ message: 'Email query param required.' });
+        const email = currentEmail(req);
         const profile = await UserProfile.findOne({ email });
         if (!profile) return res.status(404).json({ message: 'Profile not found.' });
         if (!profile.subscription?.plan) {

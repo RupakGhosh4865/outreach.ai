@@ -4,16 +4,12 @@ import axios from 'axios';
 import * as cheerio from 'cheerio';
 import fs from 'fs';
 import path from 'path';
-import crypto from 'crypto';
-import Groq from "groq-sdk";
 import { fileURLToPath } from 'url';
-import nodemailer from 'nodemailer';
 import cron from 'node-cron';
 
 import JobRequest from '../models/JobRequest.js';
 import UserProfile from '../models/UserProfile.js';
 import CompanyContact from '../models/CompanyContact.js';
-import Reply from '../models/Reply.js';
 import {
     getOptimizedResumeForJob,
     getCacheEntry,
@@ -21,13 +17,24 @@ import {
     parseResume,
 } from '../services/resume.js';
 import { buildEmailVariant } from '../services/emailComposer.js';
-import { attachResume, sendToRecipients } from '../services/mailer.js';
-// import { checkForNewReplies } from '../services/replyTrackingService.js';
+import {
+    attachResume,
+    sendToRecipients,
+    getTransporterFor,
+    senderIdentity,
+    loadProfileForSending,
+} from '../services/mailer.js';
+import { getCompanyDomain, findEmployees, saveCompanyContacts } from '../services/contacts.js';
+import { chatJson } from '../services/llm.js';
+import { claimDueJobs } from '../services/jobClaim.js';
+import { requireAuth, currentEmail } from '../middleware/auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const router = express.Router();
+
+router.use(requireAuth);
 
 // Helper to scrape basic text from a URL (e.g., LinkedIn post)
 async function fetchUrlContent(url) {
@@ -52,55 +59,9 @@ async function fetchUrlContent(url) {
     }
 }
 
-// Gemini client — initialised lazily so missing key doesn't crash at startup
-// Groq client initialization
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-/** Extract domain from company name using Hunter.io domain search */
-async function getCompanyDomain(companyName) {
-    try {
-        const { data } = await axios.get('https://api.hunter.io/v2/domain-search', {
-            params: {
-                company: companyName,
-                api_key: process.env.HUNTER_API_KEY,
-                limit: 1,
-            },
-            timeout: 10000,
-        });
-        return data?.data?.domain || null;
-    } catch (err) {
-        console.error(`[Hunter] Domain lookup failed for "${companyName}":`, err.response?.data?.errors?.[0]?.details || err.message);
-        return null;
-    }
-}
-
-/** Find up to 10 employees with emails via Hunter.io */
-async function findEmployees(domain) {
-    try {
-        const { data } = await axios.get('https://api.hunter.io/v2/domain-search', {
-            params: {
-                domain,
-                api_key: process.env.HUNTER_API_KEY,
-                limit: 10,
-                type: 'personal',
-            },
-            timeout: 10000,
-        });
-        const emails = (data?.data?.emails || []).slice(0, 10);
-        return emails.map((e) => ({
-            firstName: e.first_name || '',
-            lastName: e.last_name || '',
-            email: e.value,
-            position: e.position || '',
-            linkedinUrl: e.linkedin || '',
-        }));
-    } catch (err) {
-        console.error('Hunter.io error:', err.message);
-        return [];
-    }
-}
+// Contact discovery (getCompanyDomain / findEmployees / saveCompanyContacts) lives
+// in services/contacts.js. This file used to carry a second, drifting copy.
 
 /** Scrape LinkedIn job post (best-effort, public posts) */
 async function scrapeLinkedInJob(url) {
@@ -152,35 +113,28 @@ async function scrapeLinkedInProfile(url) {
         const $ = cheerio.load(html);
         const rawText = $('body').text().replace(/\s+/g, ' ').trim();
 
-        const systemPrompt = "You are a specialized contact data extractor. Extract personal details from the provided LinkedIn profile text.";
-        const userPrompt = `Raw Text from LinkedIn Profile:
+        return await chatJson({
+            system: 'You extract contact details from LinkedIn profile text. You never guess an email address that is not written in the text.',
+            user: `Raw Text from LinkedIn Profile:
 "${rawText.slice(0, 6000)}"
 
-TASK:
-Extract the following fields in valid JSON format:
-{
-  "firstName": "...",
-  "lastName": "...",
-  "email": "...",
-  "phone": "...",
-  "position": "..."
-}
-
-Rules:
-- If a field is not found, use an empty string.
-- Phone should be formatted as a standard international number if possible.
-- ONLY return the JSON object, nothing else.`;
-
-        const completion = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt }
-            ],
-            response_format: { type: "json_object" },
+Use an empty string for any field the text does not contain. Format phone as an international number where possible.`,
+            schema: {
+                type: 'object',
+                properties: {
+                    firstName: { type: 'string' },
+                    lastName: { type: 'string' },
+                    email: { type: 'string' },
+                    phone: { type: 'string' },
+                    position: { type: 'string' },
+                },
+                required: ['firstName', 'lastName', 'email', 'phone', 'position'],
+                additionalProperties: false,
+            },
+            schemaName: 'linkedin_contact',
+            maxTokens: 400,
+            label: 'scrape-profile',
         });
-
-        return JSON.parse(completion.choices[0].message.content);
     } catch (err) {
         console.error('LinkedIn profile scrape error:', err.message);
         return null;
@@ -190,15 +144,16 @@ Rules:
 /** Fire a saved JobRequest email (used by the scheduler cron) */
 async function fireScheduledJob(jobRecord) {
     try {
-        const profile = await UserProfile.findOne({ email: jobRecord.userEmail });
-        const gmailUser = process.env.GMAIL_USER;
-        const gmailPass = process.env.GMAIL_APP_PASSWORD;
-        if (!gmailUser || !gmailPass || !profile) return;
+        const profile = await loadProfileForSending(jobRecord.userEmail);
+        if (!profile) {
+            jobRecord.status = 'failed';
+            jobRecord.isScheduled = false;
+            await jobRecord.save();
+            console.error(`[Scheduler] No profile for ${jobRecord.userEmail}; job ${jobRecord._id} failed.`);
+            return;
+        }
 
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: gmailUser, pass: gmailPass },
-        });
+        const transporter = await getTransporterFor(profile);
 
         const { attachments, body } = attachResume({
             profile,
@@ -208,8 +163,8 @@ async function fireScheduledJob(jobRecord) {
 
         const { sentTo } = await sendToRecipients({
             transporter,
-            from: `"${profile.name || jobRecord.userEmail}" <${gmailUser}>`,
-            recipients: jobRecord.sentTo.map((email) => ({ email })),
+            from: senderIdentity(profile, jobRecord.userEmail),
+            recipients: (jobRecord.sentTo || []).map((email) => ({ email })),
             subject: jobRecord.generatedEmailSubject,
             body,
             attachments,
@@ -222,74 +177,56 @@ async function fireScheduledJob(jobRecord) {
         console.log(`[Scheduler] Fired job ${jobRecord._id} → sent to ${sentTo.length} recipient(s)`);
     } catch (err) {
         console.error('[Scheduler] Error firing job:', err.message);
+        try {
+            jobRecord.status = 'failed';
+            jobRecord.isScheduled = false;
+            await jobRecord.save();
+        } catch (saveErr) {
+            console.error('[Scheduler] Could not record failure:', saveErr.message);
+        }
     }
 }
 
-// ── Scheduled Send Cron: runs every minute ───────────────────────────────────
-cron.schedule('* * * * *', async () => {
-    try {
-        const now = new Date();
-        const dueJobs = await JobRequest.find({
-            isScheduled: true,
-            status: 'draft',
-            scheduledAt: { $lte: now },
-        });
-        for (const job of dueJobs) {
-            console.log(`[Scheduler] Due job found: ${job._id}`);
-            await fireScheduledJob(job);
+// ── Scheduled Send Cron ──────────────────────────────────────────────────────
+// Jobs are claimed atomically: an unclaimed find() would have every replica send
+// the same scheduled email.
+export function initScheduledSendService() {
+    const schedule = process.env.SCHEDULED_SEND_CRON || '* * * * *';
+    cron.schedule(schedule, async () => {
+        try {
+            const dueJobs = await claimDueJobs({
+                model: JobRequest,
+                filter: { isScheduled: true, status: 'draft', scheduledAt: { $lte: new Date() } },
+                claimField: 'scheduledClaimedAt',
+                limit: 25,
+            });
+            for (const job of dueJobs) {
+                console.log(`[Scheduler] Due job found: ${job._id}`);
+                await fireScheduledJob(job);
+            }
+        } catch (err) {
+            console.error('[Scheduler] Cron error:', err.message);
         }
-    } catch (err) {
-        console.error('[Scheduler] Cron error:', err.message);
-    }
-});
+    });
+    console.log(`📆 Scheduled-send service initialised (schedule: ${schedule})`);
+}
 
 /** Generate ONE personalised email variant (links block is added deterministically). */
 async function generateSingleVariant(params) {
     return [await buildEmailVariant(params)];
 }
 
-/** Robustly save contacts to CompanyContact collection (upsert) */
-async function saveCompanyContacts(companyName, domain, employees, source) {
-    if (!companyName || !employees || employees.length === 0) return;
-    try {
-        const normalizedName = companyName.trim();
-        // Case-insensitive find
-        let company = await CompanyContact.findOne({
-            companyName: { $regex: new RegExp(`^${normalizedName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }
-        });
-
-        if (!company) {
-            company = new CompanyContact({ companyName: normalizedName, companyDomain: domain, contacts: [] });
-            console.log(`[Company Storage] Creating new entry for: ${normalizedName}`);
-        } else if (domain && !company.companyDomain) {
-            company.companyDomain = domain;
-        }
-
-        const existingEmails = new Set(company.contacts.map(c => c.email.toLowerCase()));
-        const newContacts = employees
-            .filter(e => e.email && !existingEmails.has(e.email.toLowerCase()))
-            .map(e => ({
-                firstName: e.firstName || '',
-                lastName: e.lastName || '',
-                email: e.email,
-                position: e.position || '',
-                linkedinUrl: e.linkedinUrl || '',
-                source: source || 'manual'
-            }));
-
-        if (newContacts.length > 0) {
-            company.contacts.push(...newContacts);
-            company.updatedAt = new Date();
-            await company.save();
-            console.log(`[Company Storage] Processed ${normalizedName}: Added ${newContacts.length} new contacts.`);
-        } else {
-            console.log(`[Company Storage] No new contacts to add for ${normalizedName}.`);
-        }
-    } catch (err) {
-        console.error('[Company Storage] Error saving contacts:', err.message);
-    }
-}
-
+/** Shape shared by the URL-extract and autopilot job-parsing calls. */
+const JOB_EXTRACT_SCHEMA = {
+    type: 'object',
+    properties: {
+        companyName: { type: 'string' },
+        jobTitle: { type: 'string' },
+        jobDescription: { type: 'string' },
+    },
+    required: ['companyName', 'jobTitle', 'jobDescription'],
+    additionalProperties: false,
+};
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
@@ -340,35 +277,19 @@ router.post('/extract-from-url', async (req, res) => {
         // 1. Scrape text
         const rawText = await fetchUrlContent(url);
 
-        // 2. Use Groq to extract structured data
-        const systemPrompt = "You are a specialized job data extractor. Extract structured information from the provided raw text of a LinkedIn post or job listing.";
-        const userPrompt = `Raw Text from URL:
+        // 2. Extract structured data
+        const extracted = await chatJson({
+            system: 'You extract job details from the raw text of a LinkedIn post or job listing. You never invent a company or title the text does not state.',
+            user: `Raw Text from URL:
 "${rawText.slice(0, 5000)}"
 
-TASK:
-Extract the following fields in valid JSON format:
-{
-  "companyName": "...",
-  "jobTitle": "...",
-  "jobDescription": "..."
-}
-
-Rules:
-- If a field is not found, use an empty string.
-- Job Description should be a concise summary of requirements/role (max 1000 chars).
-- ONLY return the JSON object, nothing else.`;
-
-        const completion = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt }
-            ],
-            response_format: { type: "json_object" },
-            max_tokens: 1024,
+jobDescription: a concise summary of the role and its requirements, max 1000 characters.
+Use an empty string for anything the text does not contain.`,
+            schema: JOB_EXTRACT_SCHEMA,
+            schemaName: 'job_details',
+            maxTokens: 1024,
+            label: 'extract-from-url',
         });
-
-        const extracted = JSON.parse(completion.choices[0].message.content);
 
         // Also extract any emails shared directly in the post
         const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
@@ -421,8 +342,11 @@ router.get('/company-contacts', async (req, res) => {
         const { companyName } = req.query;
         if (!companyName) return res.status(400).json({ message: 'companyName is required.' });
 
+        // Escape before building the pattern — a company name containing regex
+        // metacharacters would otherwise change the query or blow up on parse.
+        const escaped = String(companyName).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
         const company = await CompanyContact.findOne({
-            companyName: { $regex: new RegExp(`^${companyName}$`, 'i') }
+            companyName: { $regex: new RegExp(`^${escaped}$`, 'i') }
         });
 
         res.json({ contacts: company?.contacts || [] });
@@ -435,8 +359,9 @@ router.get('/company-contacts', async (req, res) => {
 // POST /api/jobs/autopilot
 router.post('/autopilot', async (req, res) => {
     try {
-        const { url, jobText, userEmail, emailType, extraContext } = req.body;
-        if ((!url && !jobText) || !userEmail) return res.status(400).json({ message: 'URL/JobText and userEmail are required.' });
+        const { url, jobText, emailType, extraContext } = req.body;
+        const userEmail = currentEmail(req);
+        if (!url && !jobText) return res.status(400).json({ message: 'A job URL or job text is required.' });
 
         // 1. Check user & subscription limits
         let profile = await UserProfile.findOne({ email: userEmail });
@@ -470,15 +395,17 @@ router.post('/autopilot', async (req, res) => {
             rawText = jobText;
         }
         
-        const systemPrompt = "You are a specialized job data extractor. Extract structured information from the provided raw text.";
-        const userPrompt = `Raw Text from ${url ? 'URL' : 'User Input'}: "${rawText.slice(0, 5000)}"\n\nTASK:\nExtract JSON: { "companyName": "...", "jobTitle": "...", "jobDescription": "..." }\n\nRules: Max 1000 chars for description. ONLY return JSON.`;
+        const job = await chatJson({
+            system: 'You extract job details from raw text. You never invent a company or title the text does not state.',
+            user: `Raw Text from ${url ? 'URL' : 'User Input'}: "${rawText.slice(0, 5000)}"
 
-        const completion = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }],
-            response_format: { type: "json_object" },
+jobDescription: a concise summary of the role and its requirements, max 1000 characters.
+Use an empty string for anything the text does not contain.`,
+            schema: JOB_EXTRACT_SCHEMA,
+            schemaName: 'job_details',
+            maxTokens: 1024,
+            label: 'autopilot-extract',
         });
-        const job = JSON.parse(completion.choices[0].message.content);
 
         // 3a. Extract emails directly shared in the LinkedIn post text
         const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
@@ -580,7 +507,6 @@ router.post('/autopilot', async (req, res) => {
 router.post('/generate-email', async (req, res) => {
     try {
         const {
-            userEmail,
             emailType,
             jobTitle,
             companyName,
@@ -589,9 +515,7 @@ router.post('/generate-email', async (req, res) => {
             recipientName,
         } = req.body;
 
-        if (!userEmail) return res.status(400).json({ message: 'userEmail is required.' });
-
-        const profile = await UserProfile.findOne({ email: userEmail });
+        const profile = await UserProfile.findOne({ email: currentEmail(req) });
         let resumeText = '';
         if (profile?.resumePath) {
             resumeText = await parseResume(profile.resumePath);
@@ -612,8 +536,7 @@ router.post('/generate-email', async (req, res) => {
 router.post('/send', async (req, res) => {
     try {
         const {
-            userEmail,
-            recipients, // [{ name, email }]
+            recipients: bodyRecipients, // [{ name, email }]
             subject,
             body,
             linkedinUrl,
@@ -629,23 +552,24 @@ router.post('/send', async (req, res) => {
             scheduledAt,  // ISO datetime string — null / undefined = send immediately
         } = req.body;
 
-        if (!userEmail || (!recipients?.length && !manualEmail) || !subject || !body) {
-            return res.status(400).json({ message: 'userEmail, recipients, subject, and body are required.' });
+        const userEmail = currentEmail(req);
+
+        // A manual address is a recipient like any other. Previously it satisfied
+        // validation without being added to `recipients`, and the scheduled path
+        // then called `recipients.map(...)` on undefined.
+        const recipients = [
+            ...(Array.isArray(bodyRecipients) ? bodyRecipients : []),
+            ...(manualEmail?.trim()
+                ? [{ name: 'Recipient', email: manualEmail.trim(), phone: manualPhone?.trim() || '' }]
+                : []),
+        ].filter((r) => r?.email);
+
+        if (!recipients.length || !subject || !body) {
+            return res.status(400).json({ message: 'At least one recipient, a subject and a body are required.' });
         }
 
-        const gmailUser = process.env.GMAIL_USER;
-        const gmailPass = process.env.GMAIL_APP_PASSWORD;
-
-        if (!gmailUser || !gmailPass) {
-            return res.status(500).json({ message: 'Gmail credentials not configured in .env' });
-        }
-
-        const transporter = nodemailer.createTransport({
-            service: 'gmail',
-            auth: { user: gmailUser, pass: gmailPass },
-        });
-
-        const profile = await UserProfile.findOne({ email: userEmail });
+        const profile = await loadProfileForSending(userEmail);
+        const transporter = await getTransporterFor(profile);
 
         // ── Optimise Resume ────────────────────────────────────────────────────
         let optimizedPdfPath = null;
@@ -714,7 +638,7 @@ router.post('/send', async (req, res) => {
 
         const { sentTo, errors } = await sendToRecipients({
             transporter,
-            from: `"${profile?.name || userEmail}" <${gmailUser}>`,
+            from: senderIdentity(profile, userEmail),
             recipients,
             subject,
             body: outgoingBody,
@@ -745,13 +669,12 @@ router.post('/send', async (req, res) => {
             optimizedMatchScore,
             optimizedAddedKeywords,
             optimizedAtsTips,
-            // Follow-up scheduling
-            followUpDays: followUpDays || 0,
-            followUpStatus: (followUpDays !== 0 && sentTo.length > 0) ? 'pending' : 'none',
-            followUpDate: (followUpDays !== 0 && sentTo.length > 0)
-                ? (followUpDays === -1
-                    ? new Date(Date.now() + 2 * 60 * 1000) // 2 minutes for testing
-                    : new Date(Date.now() + followUpDays * 24 * 60 * 60 * 1000))
+            // Follow-up scheduling. Only a positive number of days schedules one —
+            // a magic -1 used to mean "in 2 minutes", a test hook that shipped.
+            followUpDays: followUpDays > 0 ? followUpDays : 0,
+            followUpStatus: (followUpDays > 0 && sentTo.length > 0) ? 'pending' : 'none',
+            followUpDate: (followUpDays > 0 && sentTo.length > 0)
+                ? new Date(Date.now() + followUpDays * 24 * 60 * 60 * 1000)
                 : null,
         });
         await jobRecord.save();
@@ -780,7 +703,7 @@ router.post('/schedule', async (req, res) => {
         const { jobId, scheduledAt } = req.body;
         if (!jobId || !scheduledAt) return res.status(400).json({ message: 'jobId and scheduledAt are required.' });
 
-        const job = await JobRequest.findById(jobId);
+        const job = await JobRequest.findOne({ _id: jobId, userEmail: currentEmail(req) });
         if (!job) return res.status(404).json({ message: 'Job not found.' });
 
         job.scheduledAt = new Date(scheduledAt);
@@ -794,13 +717,18 @@ router.post('/schedule', async (req, res) => {
     }
 });
 
-// GET /api/jobs/history?userEmail=xxx
+// GET /api/jobs/history?limit=&skip=
 router.get('/history', async (req, res) => {
     try {
-        const { userEmail } = req.query;
-        if (!userEmail) return res.status(400).json({ message: 'userEmail is required.' });
-        const jobs = await JobRequest.find({ userEmail }).sort({ createdAt: -1 }).limit(50);
-        res.json({ jobs });
+        const limit = Math.min(Number(req.query.limit) || 50, 100);
+        const skip = Math.max(Number(req.query.skip) || 0, 0);
+        const query = { userEmail: currentEmail(req) };
+
+        const [jobs, total] = await Promise.all([
+            JobRequest.find(query).sort({ createdAt: -1 }).skip(skip).limit(limit),
+            JobRequest.countDocuments(query),
+        ]);
+        res.json({ jobs, total, limit, skip });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
@@ -822,12 +750,19 @@ const publicOptimResult = (key, result) => ({
     pdfUrl: `/api/jobs/optimize-resume/pdf?key=${key}`,
 });
 
+/** Cache entries are per-user; never serve one to a different account. */
+function ownedEntry(req, key) {
+    const entry = getCacheEntry(key);
+    if (!entry) return null;
+    return entry.userEmail === currentEmail(req) ? entry : null;
+}
+
 // POST /api/jobs/optimize-resume — kick off (or reuse) optimization for a JD
 router.post('/optimize-resume', async (req, res) => {
-    const { jobDescription, userEmail } = req.body;
+    const { jobDescription } = req.body;
     if (!jobDescription?.trim()) return res.status(400).json({ message: 'jobDescription is required.' });
 
-    const profile = userEmail ? await UserProfile.findOne({ email: userEmail }) : null;
+    const profile = await UserProfile.findOne({ email: currentEmail(req) });
     const key = optimKey(jobDescription, profile?.email);
     const entry = getCacheEntry(key);
     if (entry?.status === 'done' && entry.result) {
@@ -841,7 +776,7 @@ router.post('/optimize-resume', async (req, res) => {
 
 // GET /api/jobs/optimize-resume/status?key=
 router.get('/optimize-resume/status', (req, res) => {
-    const entry = getCacheEntry(req.query.key);
+    const entry = ownedEntry(req, req.query.key);
     if (!entry) return res.status(404).json({ status: 'unknown' });
     if (entry.status === 'done' && entry.result) {
         return res.json({ status: 'done', result: publicOptimResult(req.query.key, entry.result) });
@@ -851,7 +786,7 @@ router.get('/optimize-resume/status', (req, res) => {
 
 // GET /api/jobs/optimize-resume/pdf?key= — inline preview / download
 router.get('/optimize-resume/pdf', (req, res) => {
-    const entry = getCacheEntry(req.query.key);
+    const entry = ownedEntry(req, req.query.key);
     const pdfPath = entry?.result?.pdfPath;
     if (entry?.status !== 'done' || !pdfPath || !fs.existsSync(pdfPath)) {
         return res.status(404).json({ message: 'Optimized PDF not available.' });
@@ -863,11 +798,11 @@ router.get('/optimize-resume/pdf', (req, res) => {
 // POST /api/jobs/analyze-fit
 router.post('/analyze-fit', async (req, res) => {
     try {
-        const { jobDescription, userEmail } = req.body;
-        if (!jobDescription || !userEmail) return res.status(400).json({ message: 'jobDescription and userEmail are required.' });
+        const { jobDescription } = req.body;
+        if (!jobDescription) return res.status(400).json({ message: 'jobDescription is required.' });
 
         // 1. Fetch user profile
-        const profile = await UserProfile.findOne({ email: userEmail });
+        const profile = await UserProfile.findOne({ email: currentEmail(req) });
         if (!profile) return res.status(404).json({ message: 'Profile not found.' });
 
         // 2. Parse resumes
@@ -880,10 +815,10 @@ router.post('/analyze-fit', async (req, res) => {
             return res.status(400).json({ message: 'No resumes found in profile.' });
         }
 
-        // 3. Prompt Groq for fast ATS scan
-        const systemPrompt = "You are an expert ATS Resume Analyzer. Your task is to output a raw JSON object comparing the user's resumes against the job description. Do NOT output markdown. Do NOT output explanations.";
-        const userPrompt = `
-Job Description:
+        // 3. ATS scan
+        const result = await chatJson({
+            system: 'You are an ATS resume analyser. You score honestly and use the full range — a resume aimed at a different domain should score below 40, not 60.',
+            user: `Job Description:
 ${jobDescription.slice(0, 4000)}
 
 --- Main Resume ---
@@ -895,32 +830,33 @@ ${resumes.genai.slice(0, 3000) || "none"}
 --- Backend Resume ---
 ${resumes.backend.slice(0, 3000) || "none"}
 
-TASK: Evaluate these resumes against the job. Output a JSON object with this exact structure:
-{
-  "scores": {
-    "main": 65,
-    "genai": 85,
-    "backend": 40
-  },
-  "recommendedResume": "genai", // one of: "main", "genai", "backend" (pick the best one)
-  "advice": [
-    "Skill gap: Missing AWS experience.",
-    "Formatting: Include more metrics."
-  ]
-}
-`;
-
-        const completion = await groq.chat.completions.create({
-            model: "llama-3.3-70b-versatile",
-            messages: [
-                { role: "system", content: systemPrompt },
-                { role: "user", content: userPrompt }
-            ],
-            response_format: { type: "json_object" },
-            temperature: 0.2,
+Score each resume 0-100 against this job. Score a resume marked "none" as 0.
+recommendedResume: whichever of the three scores highest.
+advice: 2-4 specific, actionable items ("Missing AWS experience", "Quantify the migration project"), not generic tips.`,
+            schema: {
+                type: 'object',
+                properties: {
+                    scores: {
+                        type: 'object',
+                        properties: {
+                            main: { type: 'integer' },
+                            genai: { type: 'integer' },
+                            backend: { type: 'integer' },
+                        },
+                        required: ['main', 'genai', 'backend'],
+                        additionalProperties: false,
+                    },
+                    recommendedResume: { type: 'string', enum: ['main', 'genai', 'backend'] },
+                    advice: { type: 'array', items: { type: 'string' } },
+                },
+                required: ['scores', 'recommendedResume', 'advice'],
+                additionalProperties: false,
+            },
+            schemaName: 'ats_fit',
+            maxTokens: 800,
+            label: 'analyze-fit',
         });
 
-        const result = JSON.parse(completion.choices[0].message.content);
         res.json(result);
     } catch (err) {
         console.error('Analyze fit error:', err.message);

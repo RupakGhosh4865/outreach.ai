@@ -1,23 +1,57 @@
+import { Inter, JetBrains_Mono } from 'next/font/google';
 import './globals.css';
 import Navbar from './components/Navbar';
+import { ToastProvider } from './components/ui/Toast';
+
+/**
+ * Fonts are self-hosted by next/font rather than pulled from a Google
+ * stylesheet at runtime: no render-blocking request, no layout shift, and
+ * `display: swap` keeps text visible while they load.
+ */
+const inter = Inter({
+  subsets: ['latin'],
+  variable: '--font-inter',
+  display: 'swap',
+});
+
+const jetbrains = JetBrains_Mono({
+  subsets: ['latin'],
+  weight: ['400', '500'],
+  variable: '--font-mono-jet',
+  display: 'swap',
+});
 
 export const metadata = {
-  title: 'JobReach – Job Application Automation',
-  description: 'Automate your job outreach. Paste a LinkedIn URL and send personalized referral emails in seconds.',
+  title: {
+    default: 'Outreach.ai — Job outreach on autopilot',
+    template: '%s · Outreach.ai',
+  },
+  description:
+    'Find the job, build a matched CV, reach the right person, and send a personalised email — automatically.',
+};
+
+export const viewport = {
+  width: 'device-width',
+  initialScale: 1,
+  // No maximumScale / user-scalable=no — pinch-zoom must never be disabled.
+  themeColor: '#070c15',
 };
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="en">
-      <head>
-        <meta name="viewport" content="width=device-width, initial-scale=1" />
-        <link rel="preconnect" href="https://fonts.googleapis.com" />
-        <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
-        <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Playfair+Display:wght@700;800&display=swap" rel="stylesheet" />
-      </head>
-      <body>
-        <Navbar />
-        {children}
+    <html lang="en" className={`${inter.variable} ${jetbrains.variable}`}>
+      <body className="min-h-dvh antialiased">
+        {/* Lets keyboard users jump past the nav on every page. */}
+        <a
+          href="#main"
+          className="sr-only focus:not-sr-only focus:fixed focus:left-4 focus:top-4 focus:z-[100] focus:rounded-lg focus:bg-brand focus:px-4 focus:py-2 focus:font-semibold focus:text-brand-ink"
+        >
+          Skip to content
+        </a>
+        <ToastProvider>
+          <Navbar />
+          <main id="main">{children}</main>
+        </ToastProvider>
       </body>
     </html>
   );

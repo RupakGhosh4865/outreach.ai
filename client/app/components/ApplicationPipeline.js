@@ -1,5 +1,12 @@
 'use client';
+
 import { useState, useEffect, useCallback, useRef } from 'react';
+import {
+    AlertCircle, Check, CheckCircle2, CircleDashed, FileText, Loader2, Minus,
+    RotateCcw, Send, Workflow, X,
+} from 'lucide-react';
+import { Alert, Badge, Button, Card, CardTitle, Field, Input, Textarea, cn } from './ui';
+import { apiGet, apiPost, downloadAuthedFile, openAuthedFile } from '@/lib/api';
 
 const STEP_LABELS = {
     generate_cv: 'Build job-matched CV',
@@ -8,12 +15,27 @@ const STEP_LABELS = {
     send_email: 'Send email',
 };
 
-const STEP_ICON = { pending: '○', running: '◍', done: '✓', error: '✕', skipped: '–' };
-const STEP_COLOR = { pending: 'var(--text-muted)', running: '#60a5fa', done: '#34d399', error: '#f87171', skipped: 'var(--text-muted)' };
+/* Status is carried by an icon as well as colour, so it survives a colour-vision
+   difference and a greyscale screenshot. */
+const STEP_ICON = {
+    pending: CircleDashed,
+    running: Loader2,
+    done: Check,
+    error: X,
+    skipped: Minus,
+};
+
+const STEP_TONE = {
+    pending: 'text-subtle',
+    running: 'text-info',
+    done: 'text-success',
+    error: 'text-danger',
+    skipped: 'text-subtle',
+};
 
 const STATUS_LABEL = {
     ready: 'Ready to apply',
-    applying: 'Waiting for you to approve',
+    applying: 'Waiting for your approval',
     approved: 'Starting…',
     cv_generating: 'Building your CV…',
     cv_generated: 'CV ready',
@@ -26,10 +48,18 @@ const STATUS_LABEL = {
     denied: 'Denied',
 };
 
+const STATUS_TONE = {
+    emailed: 'success',
+    cv_failed: 'danger',
+    email_failed: 'danger',
+    denied: 'neutral',
+    email_drafted: 'brand',
+};
+
 const ACTIVE_STATUSES = ['approved', 'cv_generating', 'cv_generated', 'contacts_found', 'emailing'];
 
 /** Live view of every application in flight, with per-step progress and retries. */
-export default function ApplicationPipeline({ apiBase, userEmail, isExtension, refreshKey }) {
+export default function ApplicationPipeline({ userEmail, isExtension, refreshKey }) {
     const [applications, setApplications] = useState([]);
     const [error, setError] = useState('');
     const [busyId, setBusyId] = useState('');
@@ -39,21 +69,20 @@ export default function ApplicationPipeline({ apiBase, userEmail, isExtension, r
     const load = useCallback(async () => {
         if (!userEmail) return;
         try {
-            const res = await fetch(`${apiBase}/api/applications?userEmail=${encodeURIComponent(userEmail)}`);
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.message || 'Could not load applications');
+            const data = await apiGet('/api/applications');
             setApplications(data.applications || []);
+            setError('');
         } catch (e) {
             setError(e.message);
         }
-    }, [apiBase, userEmail]);
+    }, [userEmail]);
 
     useEffect(() => { load(); }, [load, refreshKey]);
 
     // Poll only while something is actually moving.
     useEffect(() => {
         const active = applications.some(
-            (a) => a.isRunning || ACTIVE_STATUSES.includes(a.status) || a.steps?.some((s) => s.status === 'running')
+            (a) => a.isRunning || ACTIVE_STATUSES.includes(a.status) || a.steps?.some((s) => s.status === 'running'),
         );
         clearInterval(pollRef.current);
         if (active) pollRef.current = setInterval(load, 2500);
@@ -64,13 +93,7 @@ export default function ApplicationPipeline({ apiBase, userEmail, isExtension, r
         setBusyId(app._id);
         setError('');
         try {
-            const res = await fetch(`${apiBase}/api/applications/${app._id}${path}`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body || {}),
-            });
-            const data = await res.json();
-            if (!res.ok) throw new Error(data.message || 'Request failed');
+            const data = await apiPost(`/api/applications/${app._id}${path}`, body || {});
             await load();
             return data;
         } catch (e) {
@@ -80,131 +103,186 @@ export default function ApplicationPipeline({ apiBase, userEmail, isExtension, r
         }
     }
 
+    async function viewCv(app) {
+        setError('');
+        const path = `/api/applications/${app._id}/cv`;
+        const name = `CV_${(app.companyName || 'Application').replace(/[^\w-]+/g, '_')}.pdf`;
+        try {
+            const opened = await openAuthedFile(path);
+            if (!opened) await downloadAuthedFile(path, name);
+        } catch (e) {
+            setError(e.message || 'Could not open the CV.');
+        }
+    }
+
     const visible = applications.filter((a) => !['ready', 'found', 'validating'].includes(a.status));
 
     if (!userEmail) return null;
 
     return (
-        <div className="form-group" style={{ marginBottom: 32, padding: 24, background: 'rgba(52,211,153,0.04)', borderRadius: 20, border: '1px solid rgba(52,211,153,0.15)', position: 'relative' }}>
-            <div style={{ position: 'absolute', top: 0, left: 0, width: 4, height: '100%', background: '#34d399' }} />
+        <Card className="mb-4">
+            <CardTitle
+                icon={Workflow}
+                accent="success"
+                title="Application pipeline"
+                description="Everything currently in flight."
+                action={
+                    <Button type="button" variant="ghost" size="sm" onClick={load}>
+                        <RotateCcw className="size-3.5" aria-hidden="true" />
+                        <span className="sr-only sm:not-sr-only">Refresh</span>
+                    </Button>
+                }
+            />
 
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
-                <label style={{ color: '#34d399', display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.8rem', fontWeight: 800, textTransform: 'uppercase', letterSpacing: '0.05em', margin: 0 }}>
-                    ⚡ Application Pipeline
-                </label>
-                <button type="button" onClick={load} className="btn btn-secondary btn-sm">↻ Refresh</button>
-            </div>
+            {error && <Alert tone="danger" className="mb-4">{error}</Alert>}
 
-            {error && <div className="alert alert-error" style={{ marginBottom: 12 }}>{error}</div>}
+            {visible.length === 0 ? (
+                <p className="rounded-xl border border-dashed border-white/10 px-4 py-8 text-center text-sm text-subtle">
+                    Nothing in flight. Hit <strong className="text-muted">Apply now</strong> on a job, finish on the
+                    company&apos;s site, then <strong className="text-muted">Approve</strong> — the agent takes it from there.
+                </p>
+            ) : (
+                <ul className="space-y-3">
+                    {visible.map((app) => {
+                        const busy = busyId === app._id;
+                        const failed = app.steps?.find((s) => s.status === 'error');
+                        const draft = editing[app._id] || { subject: app.email?.subject || '', body: app.email?.body || '' };
+                        const canSend = ['email_drafted', 'email_failed'].includes(app.status);
 
-            {visible.length === 0 && (
-                <div style={{ fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                    Nothing in flight. Click <strong>Apply Now</strong> on a job, finish the application on the
-                    company&apos;s site, then hit <strong>Approve</strong> — the agent takes it from there.
-                </div>
-            )}
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
-                {visible.map((app) => {
-                    const busy = busyId === app._id;
-                    const failed = app.steps?.find((s) => s.status === 'error');
-                    const draft = editing[app._id] || { subject: app.email?.subject || '', body: app.email?.body || '' };
-                    const canSend = ['email_drafted', 'email_failed'].includes(app.status);
-
-                    return (
-                        <div key={app._id} style={{ padding: 16, background: 'var(--bg-secondary)', border: '1px solid var(--border)', borderRadius: 12 }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap', marginBottom: 12 }}>
-                                <div style={{ minWidth: 0 }}>
-                                    <div style={{ fontWeight: 700, fontSize: '0.95rem', color: 'var(--text-primary)' }}>
-                                        {app.jobTitle || 'Untitled role'}
+                        return (
+                            <li key={app._id} className="rounded-xl border border-white/8 bg-white/2 p-4">
+                                <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+                                    <div className="min-w-0">
+                                        <p className="truncate font-bold">{app.jobTitle || 'Untitled role'}</p>
+                                        <p className="mt-0.5 truncate text-sm text-subtle">
+                                            {app.companyName || 'Unknown company'}
+                                            {app.cv?.matchScore ? ` · ${app.cv.matchScore}% match` : ''}
+                                            {app.contacts?.length ? ` · ${app.contacts.length} contact(s)` : ''}
+                                        </p>
                                     </div>
-                                    <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)' }}>
-                                        🏢 {app.companyName || 'Unknown'}
-                                        {app.cv?.matchScore ? ` · 🎯 ${app.cv.matchScore}% match` : ''}
-                                        {app.contacts?.length ? ` · 👥 ${app.contacts.length} contact(s)` : ''}
-                                    </div>
+                                    <Badge tone={STATUS_TONE[app.status] || 'info'}>
+                                        {STATUS_LABEL[app.status] || app.status}
+                                    </Badge>
                                 </div>
-                                <div style={{ fontSize: '0.75rem', fontWeight: 700, color: app.status === 'emailed' ? '#34d399' : failed ? '#f87171' : '#60a5fa', whiteSpace: 'nowrap' }}>
-                                    {STATUS_LABEL[app.status] || app.status}
-                                </div>
-                            </div>
 
-                            {/* Step rail */}
-                            <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
-                                {(app.steps || []).map((step) => (
-                                    <div key={step.name} style={{ display: 'flex', alignItems: 'flex-start', gap: 10, fontSize: '0.82rem' }}>
-                                        <span style={{ color: STEP_COLOR[step.status], fontWeight: 700, width: 14, flexShrink: 0 }}>
-                                            {STEP_ICON[step.status]}
-                                        </span>
-                                        <span style={{ color: step.status === 'pending' ? 'var(--text-muted)' : 'var(--text-secondary)' }}>
-                                            {STEP_LABELS[step.name] || step.name}
-                                            {step.name === 'send_email' && !app.autoSend && step.status === 'pending' && ' (waits for your review)'}
-                                            {step.error && (
-                                                <span style={{ display: 'block', color: '#f87171', fontSize: '0.75rem', marginTop: 2 }}>{step.error}</span>
-                                            )}
-                                        </span>
+                                {/* Step rail */}
+                                <ol className="mb-3 space-y-1.5">
+                                    {(app.steps || []).map((step) => {
+                                        const Icon = STEP_ICON[step.status] || CircleDashed;
+                                        return (
+                                            <li key={step.name} className="flex items-start gap-2.5 text-sm">
+                                                <Icon
+                                                    className={cn(
+                                                        'mt-0.5 size-4 shrink-0',
+                                                        STEP_TONE[step.status],
+                                                        step.status === 'running' && 'animate-spin',
+                                                    )}
+                                                    aria-hidden="true"
+                                                />
+                                                <span className={step.status === 'pending' ? 'text-subtle' : 'text-muted'}>
+                                                    {STEP_LABELS[step.name] || step.name}
+                                                    {step.name === 'send_email' && !app.autoSend && step.status === 'pending' && (
+                                                        <span className="text-subtle"> (waits for your review)</span>
+                                                    )}
+                                                    {step.error && (
+                                                        <span className="mt-0.5 block text-xs text-danger">{step.error}</span>
+                                                    )}
+                                                </span>
+                                            </li>
+                                        );
+                                    })}
+                                </ol>
+
+                                {/* Draft review */}
+                                {canSend && (
+                                    <div className="mb-3 space-y-3 border-t border-white/8 pt-3">
+                                        <Field label="Subject" htmlFor={`subject-${app._id}`} className="mb-0">
+                                            <Input
+                                                id={`subject-${app._id}`}
+                                                value={draft.subject}
+                                                onChange={(e) => setEditing((p) => ({ ...p, [app._id]: { ...draft, subject: e.target.value } }))}
+                                            />
+                                        </Field>
+                                        <Field label="Body" htmlFor={`body-${app._id}`} className="mb-0">
+                                            <Textarea
+                                                id={`body-${app._id}`}
+                                                value={draft.body}
+                                                onChange={(e) => setEditing((p) => ({ ...p, [app._id]: { ...draft, body: e.target.value } }))}
+                                                className="min-h-40 font-mono text-[0.85rem]"
+                                            />
+                                        </Field>
+                                        <p className="text-xs text-subtle">
+                                            To: {(app.contacts || []).map((c) => c.email).join(', ') || 'no recipients found'}
+                                        </p>
                                     </div>
-                                ))}
-                            </div>
+                                )}
 
-                            {/* Draft review */}
-                            {canSend && (
-                                <div style={{ marginTop: 8, marginBottom: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                                    <input
-                                        value={draft.subject}
-                                        onChange={(e) => setEditing((p) => ({ ...p, [app._id]: { ...draft, subject: e.target.value } }))}
-                                        placeholder="Subject"
-                                        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'white', borderRadius: 8, padding: '10px 12px', fontSize: '0.88rem' }}
-                                    />
-                                    <textarea
-                                        value={draft.body}
-                                        onChange={(e) => setEditing((p) => ({ ...p, [app._id]: { ...draft, body: e.target.value } }))}
-                                        style={{ background: 'var(--bg-primary)', border: '1px solid var(--border)', color: 'white', borderRadius: 8, padding: '10px 12px', fontSize: '0.85rem', minHeight: 160, resize: 'vertical', fontFamily: 'inherit' }}
-                                    />
-                                    <div style={{ fontSize: '0.72rem', color: 'var(--text-muted)' }}>
-                                        To: {(app.contacts || []).map((c) => c.email).join(', ') || 'no recipients found'}
-                                    </div>
-                                </div>
-                            )}
+                                {app.email?.sentAt && (
+                                    <p className="mb-3 text-xs text-subtle">
+                                        Sent <time dateTime={app.email.sentAt}>{new Date(app.email.sentAt).toLocaleString()}</time>
+                                        {' '}to {(app.email.to || []).join(', ')}
+                                        {app.email.attachmentStatus === 'missing' && (
+                                            <span className="text-warning"> · no resume attached</span>
+                                        )}
+                                    </p>
+                                )}
 
-                            {app.email?.sentAt && (
-                                <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginBottom: 10 }}>
-                                    Sent {new Date(app.email.sentAt).toLocaleString()} to {(app.email.to || []).join(', ')}
-                                    {app.email.attachmentStatus === 'missing' && (
-                                        <span style={{ color: '#fbbf24' }}> · ⚠ no resume attached</span>
+                                <div className="flex flex-wrap gap-2">
+                                    {app.cv?.pdfPath && (
+                                        /* Fetched with the auth header rather than linked
+                                           directly — a browser navigation can't send one. */
+                                        <Button
+                                            type="button"
+                                            variant="secondary"
+                                            size="sm"
+                                            onClick={() => viewCv(app)}
+                                        >
+                                            <FileText className="size-3.5" aria-hidden="true" />
+                                            View CV
+                                        </Button>
+                                    )}
+                                    {canSend && (
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            loading={busy}
+                                            disabled={busy || !app.contacts?.length}
+                                            onClick={() => act(app, '/send', { subject: draft.subject, body: draft.body })}
+                                        >
+                                            {!busy && <Send className="size-3.5" aria-hidden="true" />}
+                                            Review &amp; send
+                                        </Button>
+                                    )}
+                                    {failed && (
+                                        <Button
+                                            type="button"
+                                            size="sm"
+                                            variant="secondary"
+                                            loading={busy}
+                                            disabled={busy}
+                                            onClick={() => act(app, '/retry', { step: failed.name })}
+                                        >
+                                            {!busy && <RotateCcw className="size-3.5" aria-hidden="true" />}
+                                            Retry {STEP_LABELS[failed.name] || failed.name}
+                                        </Button>
+                                    )}
+                                    {app.status === 'applying' && (
+                                        <>
+                                            <Button type="button" size="sm" disabled={busy} onClick={() => act(app, '/approve', { autoSend: false })}>
+                                                <CheckCircle2 className="size-3.5" aria-hidden="true" />
+                                                Approve
+                                            </Button>
+                                            <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={() => act(app, '/deny')}>
+                                                Deny
+                                            </Button>
+                                        </>
                                     )}
                                 </div>
-                            )}
-
-                            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                                {app.cv?.pdfPath && (
-                                    <a href={`${apiBase}/api/applications/${app._id}/cv`} target="_blank" rel="noreferrer" className="btn btn-secondary btn-sm" style={{ textDecoration: 'none' }}>
-                                        📄 View CV
-                                    </a>
-                                )}
-                                {canSend && (
-                                    <button type="button" className="btn btn-primary btn-sm" disabled={busy || !app.contacts?.length}
-                                        onClick={() => act(app, '/send', { subject: draft.subject, body: draft.body })}>
-                                        {busy ? <div className="spinner" /> : '📤 Review & Send'}
-                                    </button>
-                                )}
-                                {failed && (
-                                    <button type="button" className="btn btn-primary btn-sm" disabled={busy}
-                                        onClick={() => act(app, '/retry', { step: failed.name })}>
-                                        ↻ Retry {STEP_LABELS[failed.name] || failed.name}
-                                    </button>
-                                )}
-                                {app.status === 'applying' && (
-                                    <>
-                                        <button type="button" className="btn btn-primary btn-sm" disabled={busy} onClick={() => act(app, '/approve', { autoSend: false })}>✓ Approve</button>
-                                        <button type="button" className="btn btn-secondary btn-sm" disabled={busy} onClick={() => act(app, '/deny')}>✕ Deny</button>
-                                    </>
-                                )}
-                            </div>
-                        </div>
-                    );
-                })}
-            </div>
-        </div>
+                            </li>
+                        );
+                    })}
+                </ul>
+            )}
+        </Card>
     );
 }

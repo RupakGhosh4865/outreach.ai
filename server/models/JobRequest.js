@@ -48,9 +48,22 @@ const jobRequestSchema = new mongoose.Schema({
     followUpDate: { type: Date, default: null },
     followUpStatus: {
         type: String,
-        enum: ['none', 'pending', 'due', 'sent', 'cancelled'],
+        // 'failed' is terminal. It was previously assigned by the reminder service
+        // without being listed here, so the save threw and the record stayed
+        // 'pending' — retrying a permanently broken follow-up on every tick.
+        enum: ['none', 'pending', 'due', 'sent', 'cancelled', 'failed'],
         default: 'none'
     },
+    followUpSentAt: { type: Date, default: null },
+    followUpError: { type: String, default: null },
+    // Set when a worker claims this row, so replicas can't both send it.
+    followUpClaimedAt: { type: Date, default: null },
+    scheduledClaimedAt: { type: Date, default: null },
 });
+
+// The follow-up and scheduled-send crons both query on (status, date).
+jobRequestSchema.index({ followUpStatus: 1, followUpDate: 1 });
+jobRequestSchema.index({ isScheduled: 1, status: 1, scheduledAt: 1 });
+jobRequestSchema.index({ userEmail: 1, createdAt: -1 });
 
 export default mongoose.model('JobRequest', jobRequestSchema);

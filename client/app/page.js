@@ -1,165 +1,217 @@
 'use client';
-import { useState, useEffect } from 'react';
+
+import { useState, useEffect, useLayoutEffect } from 'react';
 import Link from 'next/link';
-import { Zap, Sparkles } from 'lucide-react';
+import {
+  ArrowRight, Building2, CheckCircle2, Mail, Send, Sparkles, User, Zap,
+} from 'lucide-react';
 import LandingPage from './components/LandingPage';
 import Onboarding from './components/Onboarding';
+import { Badge, Card, EmptyState, Skeleton, Stat } from './components/ui';
+import { apiGet } from '@/lib/api';
 
-const API = 'http://localhost:5000';
+const STATUS_TONE = {
+  sent: 'success',
+  draft: 'neutral',
+  generated: 'info',
+  failed: 'danger',
+};
+
+/**
+ * useLayoutEffect on the client, useEffect on the server (where it's a no-op and
+ * React would otherwise warn). Reading the auth token in a layout effect lets us
+ * swap to the dashboard *before* the browser paints, so a signed-in user never
+ * sees a flash of the marketing page.
+ */
+const useIsomorphicLayoutEffect = typeof window === 'undefined' ? useEffect : useLayoutEffect;
+
+function RecentRow({ job }) {
+  return (
+    <tr className="border-t border-white/5 transition-colors hover:bg-white/2">
+      <td className="px-4 py-4 font-semibold sm:px-6">{job.companyName || '—'}</td>
+      <td className="px-4 py-4 text-muted sm:px-6">{job.jobTitle || '—'}</td>
+      <td className="px-4 py-4 sm:px-6">
+        <Badge tone={STATUS_TONE[job.status] || 'neutral'}>{job.status}</Badge>
+      </td>
+      <td className="whitespace-nowrap px-4 py-4 text-sm text-subtle sm:px-6">
+        <time dateTime={job.createdAt}>{new Date(job.createdAt).toLocaleDateString()}</time>
+      </td>
+    </tr>
+  );
+}
 
 export default function HomePage() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [profile, setProfile] = useState(null);
   const [history, setHistory] = useState([]);
-  const [loading, setLoading] = useState(true);
+  // Only the 5 most recent rows are fetched, so the count comes from the server.
+  const [totalOutreaches, setTotalOutreaches] = useState(0);
+  const [dataLoading, setDataLoading] = useState(true);
 
-  useEffect(() => {
-    const token = localStorage.getItem('authToken');
-    const userEmail = localStorage.getItem('jobreach_email');
-
-    if (token) {
-      setIsLoggedIn(true);
-      if (userEmail) fetchData(userEmail, token);
-    }
-    setLoading(false);
+  // The signed-out landing page is the server-rendered default, so search
+  // engines and first paint get real content instead of a loading skeleton.
+  useIsomorphicLayoutEffect(() => {
+    if (localStorage.getItem('authToken')) setIsLoggedIn(true);
+    else setDataLoading(false);
   }, []);
 
-  async function fetchData(email, token) {
-    try {
-      const [pRes, hRes] = await Promise.all([
-        fetch(`${API}/api/profile?email=${encodeURIComponent(email)}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }),
-        fetch(`${API}/api/jobs/history?userEmail=${encodeURIComponent(email)}`, {
-          headers: { 'Authorization': `Bearer ${token}` }
-        }),
-      ]);
-      if (pRes.ok) { const d = await pRes.json(); setProfile(d.profile); }
-      if (hRes.ok) { const d = await hRes.json(); setHistory(d.jobs || []); }
-    } catch { /* server might be off */ }
+  useEffect(() => {
+    if (isLoggedIn) fetchData();
+  }, [isLoggedIn]);
+
+  // Both endpoints derive the account from the token, so no email is passed.
+  async function fetchData() {
+    const [profileRes, historyRes] = await Promise.allSettled([
+      apiGet('/api/profile'),
+      apiGet('/api/jobs/history?limit=5'),
+    ]);
+    if (profileRes.status === 'fulfilled') setProfile(profileRes.value.profile);
+    if (historyRes.status === 'fulfilled') {
+      setHistory(historyRes.value.jobs || []);
+      setTotalOutreaches(historyRes.value.total ?? (historyRes.value.jobs || []).length);
+    }
+    setDataLoading(false);
   }
 
-  const handleStartOnboarding = () => setShowOnboarding(true);
-
   const handleFinishOnboarding = (data) => {
-    // Save onboarding data temporarily or send to API
     localStorage.setItem('onboarding_data', JSON.stringify(data));
     window.location.href = '/login';
   };
 
-  if (loading) return <div className="page"><div className="container">Loading...</div></div>;
-
   if (!isLoggedIn) {
-    if (showOnboarding) {
-      return <Onboarding onFinish={handleFinishOnboarding} />;
-    }
-    return <LandingPage onStartOnboarding={handleStartOnboarding} />;
+    if (showOnboarding) return <Onboarding onFinish={handleFinishOnboarding} />;
+    return <LandingPage onStartOnboarding={() => setShowOnboarding(true)} />;
   }
 
   const stats = {
-    total: history.length,
-    sent: history.filter(j => j.status === 'sent').length,
-    companies: [...new Set(history.map(j => j.companyName).filter(Boolean))].length,
+    total: totalOutreaches,
+    sent: history.filter((j) => j.status === 'sent').length,
+    companies: [...new Set(history.map((j) => j.companyName).filter(Boolean))].length,
   };
 
+  const firstName = profile?.name?.split(' ')[0];
+  const plan = profile?.subscription?.plan || 'free';
+
   return (
-    <main className="page">
-      <div className="section-container">
-        <header className="mb-12">
-          <h1 className="text-3xl font-bold tracking-tight mb-3">
-            Welcome back{profile ? `, ${profile.name.split(' ')[0]}` : ''}
-          </h1>
-          <p className="text-white/40 text-lg">
-            You have {stats.total} outreaches tracked. Ready to find your next role?
+    <div className="shell page-top pb-20">
+      {/* ── Header ─────────────────────────────────────────────────────── */}
+      <header className="animate-fade-up mb-8 sm:mb-10">
+        <h1 className="text-2xl font-extrabold tracking-tight sm:text-3xl">
+          Welcome back{firstName ? `, ${firstName}` : ''}
+        </h1>
+        <p className="mt-2 text-muted">
+          {stats.total > 0
+            ? `${stats.total} outreach${stats.total === 1 ? '' : 'es'} tracked. Ready for the next one?`
+            : 'Let’s get your first application out the door.'}
+        </p>
+      </header>
+
+      {/* ── Primary actions ────────────────────────────────────────────── */}
+      <div className="mb-8 grid gap-4 sm:mb-10 sm:grid-cols-2">
+        <Card className="group flex flex-col transition-colors duration-200 hover:border-brand/30">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="grid size-10 place-items-center rounded-xl bg-brand/10 text-brand ring-1 ring-brand/20">
+              <Zap className="size-5" aria-hidden="true" />
+            </span>
+            <h2 className="text-lg font-bold">Start an outreach</h2>
+          </div>
+          <p className="mb-6 flex-1 text-sm leading-relaxed text-muted">
+            Paste a job link or description. We’ll build a matched CV, find the right
+            contact, and draft the email.
           </p>
-        </header>
+          <Link href="/outreach" className="ui-btn ui-btn-primary ui-btn-block">
+            New outreach
+            <ArrowRight className="size-4 transition-transform duration-200 group-hover:translate-x-0.5" aria-hidden="true" />
+          </Link>
+        </Card>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
-          <div className="bg-[#0F2137] border border-white/5 rounded-2xl p-8 hover:border-[#A8E063]/30 transition-all">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-lg bg-[#A8E063]/10 flex items-center justify-center text-[#A8E063]">
-                <Zap size={20} />
-              </div>
-              <h3 className="text-white font-bold text-lg">Fast Action</h3>
-            </div>
-            <p className="text-white/40 text-sm mb-8 leading-relaxed">
-              Paste a LinkedIn URL and start a new automated outreach campaign.
-            </p>
-            <Link href="/outreach" className="flex items-center justify-center w-full py-4 bg-[#A8E063] hover:bg-[#7EC63A] text-[#060D18] font-bold rounded-lg transition-all no-underline">
-              New Outreach
-            </Link>
+        <Card className="flex flex-col transition-colors duration-200 hover:border-brand/30">
+          <div className="mb-4 flex items-center gap-3">
+            <span className="grid size-10 place-items-center rounded-xl bg-info/10 text-info ring-1 ring-info/20">
+              <User className="size-5" aria-hidden="true" />
+            </span>
+            <h2 className="text-lg font-bold">Your account</h2>
+          </div>
+          <div className="mb-6 flex-1">
+            <Badge tone={plan === 'free' ? 'brand' : 'success'} icon={Sparkles}>
+              {plan} plan
+            </Badge>
+            {!profile?.resumeOriginalName && (
+              <p className="mt-3 text-sm text-warning">
+                No resume uploaded yet — emails and CVs will be generic without one.
+              </p>
+            )}
+          </div>
+          <Link href="/profile" className="ui-btn ui-btn-secondary ui-btn-block">
+            Manage profile
+          </Link>
+        </Card>
+      </div>
+
+      {/* ── Stats ──────────────────────────────────────────────────────── */}
+      {/* 2 columns on phones, 3 from lg. The third card spans both columns at the
+          2-col size so the row never ends with an orphaned half-width cell. */}
+      <div className="mb-8 grid grid-cols-2 gap-4 sm:mb-10 lg:grid-cols-3">
+        <Stat label="Total outreaches" value={stats.total} icon={Send} tone="brand" />
+        <Stat label="Sent" value={stats.sent} icon={CheckCircle2} tone="success" hint="in recent activity" />
+        <div className="col-span-2 lg:col-span-1">
+          <Stat label="Companies" value={stats.companies} icon={Building2} tone="info" hint="in recent activity" />
+        </div>
+      </div>
+
+      {/* ── Recent activity ────────────────────────────────────────────── */}
+      <section aria-labelledby="recent-heading">
+        <Card padded={false} className="overflow-hidden">
+          <div className="flex items-center justify-between gap-4 border-b border-white/6 px-5 py-4 sm:px-6">
+            <h2 id="recent-heading" className="font-bold">Recent outreach</h2>
+            {history.length > 0 && (
+              <Link
+                href="/history"
+                className="tap group inline-flex items-center gap-1 rounded-md text-xs font-bold uppercase tracking-widest text-brand"
+              >
+                View all
+                <ArrowRight className="size-3.5 transition-transform duration-200 group-hover:translate-x-0.5" aria-hidden="true" />
+              </Link>
+            )}
           </div>
 
-          <div className="bg-[#0F2137] border border-white/5 rounded-2xl p-8 hover:border-[#A8E063]/30 transition-all">
-            <div className="flex items-center gap-3 mb-4">
-              <div className="w-10 h-10 rounded-lg bg-[#A8E063]/10 flex items-center justify-center text-[#A8E063]">
-                <Sparkles size={20} />
-              </div>
-              <h3 className="text-white font-bold text-lg">Account</h3>
+          {dataLoading ? (
+            <div className="space-y-3 p-5 sm:p-6">
+              {[0, 1, 2].map((i) => <Skeleton key={i} className="h-12 w-full" />)}
             </div>
-            <div className="mb-8">
-              <span className={`px-3 py-1 rounded-full text-[10px] font-bold uppercase tracking-wider ${profile?.subscription?.plan === 'free' ? 'bg-[#A8E063]/10 text-[#A8E063] border border-[#A8E063]/20' : 'bg-[#7EC63A] text-black'}`}>
-                {profile?.subscription?.plan || 'Free'} Plan
-              </span>
-            </div>
-            <Link href="/profile" className="flex items-center justify-center w-full py-4 border border-white/10 hover:border-white/20 text-white font-bold rounded-lg transition-all no-underline">
-              Manage Profile
-            </Link>
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
-          {[
-            { label: 'Total Outreaches', value: stats.total },
-            { label: 'Emails Sent', value: stats.sent },
-            { label: 'Companies', value: stats.companies },
-          ].map((stat, i) => (
-            <div key={i} className="bg-[#0F2137] border border-white/5 rounded-2xl p-8 text-center md:text-left">
-              <div className="text-white/30 text-xs font-bold uppercase tracking-widest mb-2">{stat.label}</div>
-              <div className="text-[#A8E063] text-4xl font-extrabold tracking-tight">{stat.value}</div>
-            </div>
-          ))}
-        </div>
-
-        {history.length > 0 && (
-          <div className="bg-[#0F2137] border border-white/5 rounded-2xl overflow-hidden">
-            <div className="px-8 py-6 border-b border-white/[0.06] flex justify-between items-center">
-              <h3 className="text-white font-bold">Recent Outreach</h3>
-              <Link href="/history" className="text-[#A8E063] text-xs font-bold uppercase tracking-widest hover:translate-x-1 transition-transform inline-block no-underline">View All →</Link>
-            </div>
-            <div className="overflow-x-auto">
-              <table className="w-full text-left">
+          ) : history.length === 0 ? (
+            <EmptyState
+              icon={Mail}
+              title="No outreach yet"
+              description="Your sent applications and their status will appear here."
+              action={<Link href="/outreach" className="ui-btn ui-btn-primary">Create your first outreach</Link>}
+            />
+          ) : (
+            /* Table scrolls inside its own box so the page never scrolls sideways. */
+            <div className="scroll-x">
+              <table className="w-full min-w-136 text-left text-sm">
                 <thead>
-                  <tr className="bg-white/[0.02]">
-                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Company</th>
-                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Role</th>
-                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Status</th>
-                    <th className="px-8 py-4 text-[10px] uppercase tracking-widest text-white/30 font-bold">Date</th>
+                  <tr className="bg-white/2">
+                    {['Company', 'Role', 'Status', 'Date'].map((h) => (
+                      <th
+                        key={h}
+                        scope="col"
+                        className="px-4 py-3 text-[0.65rem] font-bold uppercase tracking-widest text-subtle sm:px-6"
+                      >
+                        {h}
+                      </th>
+                    ))}
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-white/[0.04]">
-                  {history.slice(0, 5).map(j => (
-                    <tr key={j._id} className="hover:bg-white/[0.02] transition-colors">
-                      <td className="px-8 py-5 text-sm font-bold text-white">{j.companyName}</td>
-                      <td className="px-8 py-5 text-sm text-white/50">{j.jobTitle}</td>
-                      <td className="px-8 py-5">
-                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-tighter ${j.status === 'sent' ? 'bg-[#A8E063]/10 text-[#A8E063]' : 'bg-red-500/10 text-red-500'}`}>
-                          {j.status}
-                        </span>
-                      </td>
-                      <td className="px-8 py-5 text-sm text-white/30 font-mono italic">{new Date(j.createdAt).toLocaleDateString()}</td>
-                    </tr>
-                  ))}
+                <tbody>
+                  {history.map((job) => <RecentRow key={job._id} job={job} />)}
                 </tbody>
               </table>
             </div>
-          </div>
-        )}
-      </div>
-      <style jsx>{`
-                .no-underline { text-decoration: none; }
-            `}</style>
-    </main>
+          )}
+        </Card>
+      </section>
+    </div>
   );
 }

@@ -4,15 +4,17 @@ import DiscoveredJob from '../models/DiscoveredJob.js';
 import ScanRun from '../models/ScanRun.js';
 import { startScan, isScanning, ALL_SOURCES } from '../services/jobRadar.js';
 import { upsertApplication } from './jobSources.js';
+import { requireAuth, currentEmail, loadOwnedDiscoveredJob } from '../middleware/auth.js';
 
 const router = express.Router();
 
-// POST /api/job-radar/scan — { userEmail, sources? }
+router.use(requireAuth);
+
+// POST /api/job-radar/scan — { sources? }
 router.post('/scan', async (req, res) => {
     try {
-        const { userEmail, sources } = req.body;
-        if (!userEmail) return res.status(400).json({ message: 'userEmail is required.' });
-        const scan = await startScan({ userEmail, sources });
+        const { sources } = req.body;
+        const scan = await startScan({ userEmail: currentEmail(req), sources });
         res.status(202).json({ scanId: scan._id, roles: scan.roles, message: 'Scan started.' });
     } catch (err) {
         res.status(err.status || 500).json({ message: err.message });
@@ -23,20 +25,20 @@ router.post('/scan', async (req, res) => {
 router.get('/scan/:id', async (req, res) => {
     try {
         const scan = await ScanRun.findById(req.params.id).lean();
-        if (!scan) return res.status(404).json({ message: 'Scan not found.' });
-        res.json({ scan: { ...scan, isScanning: isScanning(scan.userEmail) } });
+        if (!scan || scan.userEmail !== currentEmail(req)) {
+            return res.status(404).json({ message: 'Scan not found.' });
+        }
+        res.json({ scan: { ...scan, isScanning: await isScanning(scan.userEmail) } });
     } catch (err) {
         res.status(500).json({ message: err.message });
     }
 });
 
-// GET /api/job-radar/jobs?userEmail=&minScore=&source=&status=
+// GET /api/job-radar/jobs?minScore=&source=&status=
 router.get('/jobs', async (req, res) => {
     try {
-        const { userEmail, minScore, source, status } = req.query;
-        if (!userEmail) return res.status(400).json({ message: 'userEmail is required.' });
-
-        const query = { userEmail };
+        const { minScore, source, status } = req.query;
+        const query = { userEmail: currentEmail(req) };
         query.status = status ? { $in: String(status).split(',') } : { $ne: 'dismissed' };
         if (source) query.source = { $in: String(source).split(',') };
         if (minScore) query.matchScore = { $gte: Number(minScore) };
@@ -53,7 +55,12 @@ router.get('/jobs', async (req, res) => {
 
 const setStatus = (status) => async (req, res) => {
     try {
-        const job = await DiscoveredJob.findByIdAndUpdate(req.params.id, { status }, { new: true });
+        // Scoped to the caller so an id from another account can't be mutated.
+        const job = await DiscoveredJob.findOneAndUpdate(
+            { _id: req.params.id, userEmail: currentEmail(req) },
+            { status },
+            { new: true },
+        );
         if (!job) return res.status(404).json({ message: 'Job not found.' });
         res.json({ job });
     } catch (err) {
@@ -67,8 +74,7 @@ router.post('/jobs/:id/dismiss', setStatus('dismissed'));
 // POST /api/job-radar/jobs/:id/to-pipeline — hand a discovered job to the Apply/CV pipeline
 router.post('/jobs/:id/to-pipeline', async (req, res) => {
     try {
-        const job = await DiscoveredJob.findById(req.params.id);
-        if (!job) return res.status(404).json({ message: 'Job not found.' });
+        const job = await loadOwnedDiscoveredJob(req);
 
         const application = await upsertApplication(job.userEmail, {
             jobTitle: job.title,
@@ -86,7 +92,7 @@ router.post('/jobs/:id/to-pipeline', async (req, res) => {
 
         res.json({ job, application });
     } catch (err) {
-        res.status(500).json({ message: err.message });
+        res.status(err.status || 500).json({ message: err.message });
     }
 });
 

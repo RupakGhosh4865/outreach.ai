@@ -1,10 +1,11 @@
 import 'dotenv/config';
-import Groq from 'groq-sdk';
+import { chatJson, isQuotaError } from './llm.js';
 
 import ScanRun from '../models/ScanRun.js';
 import DiscoveredJob from '../models/DiscoveredJob.js';
 import UserProfile from '../models/UserProfile.js';
 import { parseResume, profileSummary } from './resume.js';
+import { acquireLock, releaseLock, isLocked } from './lock.js';
 
 import { safeSearch } from './jobSources/shared.js';
 import { searchAdzuna, searchJSearch } from './jobSources/boards.js';
@@ -16,32 +17,36 @@ import { searchGoogleJobs } from './jobSources/googleJobs.js';
 import { searchGitHub } from './jobSources/github.js';
 import { searchCouncils } from './jobSources/councils.js';
 
-const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-
-export const ALL_SOURCES = ['adzuna', 'jsearch', 'linkedin', 'indeed', 'glassdoor', 'wellfound', 'google', 'github', 'council'];
+export const ALL_SOURCES =['adzuna', 'jsearch', 'linkedin', 'indeed', 'glassdoor', 'wellfound', 'google', 'github', 'council'];
 const MAX_SCORED_PER_SCAN = 60;
 const SCORE_BATCH = 5;
 
 const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-// One scan per user at a time.
-const running = new Map(); // userEmail -> Promise
+// One scan per user at a time, enforced across replicas by the Mongo lock.
+const localScans = new Map(); // userEmail -> Promise
+const scanLockKey = (userEmail) => `radar-scan:${userEmail}`;
 
-/** Expand the user's target roles into adjacent search titles (one Groq call). */
+/** Expand the user's target roles into adjacent search titles (one LLM call). */
 async function expandRoles(targetRoles) {
     const base = String(targetRoles || '').split(/[,;\/]/).map((s) => s.trim()).filter(Boolean);
     if (!base.length) return [];
     try {
-        const completion = await groq.chat.completions.create({
-            model: 'llama-3.3-70b-versatile',
-            messages: [
-                { role: 'system', content: 'You expand job titles into closely-related search titles. JSON only.' },
-                { role: 'user', content: `Target roles: ${base.join(', ')}\n\nReturn JSON: { "roles": ["up to 5 job titles, the originals first, then close variants (e.g. Business Analyst -> Data Analyst, Finance Analyst)"] }` },
-            ],
-            response_format: { type: 'json_object' },
-            max_tokens: 300,
+        const { roles = [] } = await chatJson({
+            system: 'You expand job titles into closely-related titles that job boards actually use.',
+            user: `Target roles: ${base.join(', ')}
+
+Return the original titles first, then close variants a recruiter would post under (e.g. Business Analyst -> Data Analyst, Finance Analyst). Use titles that appear in real job postings, not invented ones. Max 5 total.`,
+            schema: {
+                type: 'object',
+                properties: { roles: { type: 'array', items: { type: 'string' } } },
+                required: ['roles'],
+                additionalProperties: false,
+            },
+            schemaName: 'expanded_roles',
+            maxTokens: 300,
+            label: 'expand-roles',
         });
-        const roles = JSON.parse(completion.choices[0].message.content).roles || [];
         return [...new Set([...base, ...roles])].slice(0, 5);
     } catch (err) {
         console.warn('[Radar] role expansion failed:', err.message);
@@ -64,16 +69,13 @@ async function scoreBatch(jobs, resumeText, summary) {
         `[${i}] ${j.title} at ${j.company} (${j.location})\n${(j.description || '').slice(0, 900)}`
     ).join('\n\n---\n\n');
 
-    const completion = await groq.chat.completions.create({
-        model: 'llama-3.3-70b-versatile',
-        messages: [
-            {
-                role: 'system',
-                content: 'You are an ATS matcher. Score how well ONE candidate fits EACH job. JSON only. Be honest — most jobs score 30-70.',
-            },
-            {
-                role: 'user',
-                content: `CANDIDATE RESUME:
+    const { scores = [] } = await chatJson({
+        system: [
+            'You are an ATS matcher. You score how well ONE candidate fits EACH job.',
+            'Be honest and use the full range: most real matches land between 30 and 70.',
+            'Reserve 80+ for candidates who clearly meet the stated must-haves, and score below 30 when the domain or seniority is plainly wrong.',
+        ].join(' '),
+        user: `CANDIDATE RESUME:
 ${(resumeText || '').slice(0, 3000) || '(no resume text)'}
 
 CANDIDATE PROFILE:
@@ -82,30 +84,151 @@ ${summary || '(none)'}
 JOBS:
 ${jobsBlock}
 
-Return JSON: { "scores": [{ "index": 0, "matchScore": 0-100, "matchedSkills": ["max 6"], "missingSkills": ["max 4"], "summary": "one sentence on fit" }] } — one entry per job, in order.`,
+Return one entry per job, in the same order, using the bracketed index shown above.
+matchedSkills: skills the candidate demonstrably has that this job asks for (max 6).
+missingSkills: must-haves the job asks for that the candidate does not evidence (max 4).`,
+        schema: {
+            type: 'object',
+            properties: {
+                scores: {
+                    type: 'array',
+                    items: {
+                        type: 'object',
+                        properties: {
+                            index: { type: 'integer' },
+                            matchScore: { type: 'integer' },
+                            matchedSkills: { type: 'array', items: { type: 'string' } },
+                            missingSkills: { type: 'array', items: { type: 'string' } },
+                            summary: { type: 'string' },
+                        },
+                        required: ['index', 'matchScore', 'matchedSkills', 'missingSkills', 'summary'],
+                        additionalProperties: false,
+                    },
+                },
             },
-        ],
-        response_format: { type: 'json_object' },
-        max_tokens: 1800,
-        temperature: 0.2,
+            required: ['scores'],
+            additionalProperties: false,
+        },
+        schemaName: 'job_scores',
+        maxTokens: 1800,
+        label: 'score-batch',
     });
 
-    const scores = JSON.parse(completion.choices[0].message.content).scores || [];
     const byIndex = new Map(scores.map((s) => [s.index, s]));
     return jobs.map((_, i) => byIndex.get(i) || null);
 }
 
-async function setSource(scan, name, patch) {
-    const entry = scan.sources.find((s) => s.name === name);
-    if (entry) Object.assign(entry, patch);
-    await scan.save();
+/**
+ * Update one source's row on a scan.
+ *
+ * Connectors run concurrently, so this must not be a load-mutate-save on a
+ * shared Mongoose document: several finishing at once triggered
+ * ParallelSaveError and killed the whole scan. A positional update touches only
+ * that source's fields, so concurrent writers can't collide or clobber each
+ * other's status.
+ */
+async function setSource(scanId, name, patch) {
+    const $set = {};
+    for (const [key, value] of Object.entries(patch)) {
+        // `undefined` is not a valid $set value; store an explicit null instead.
+        $set[`sources.$.${key}`] = value === undefined ? null : value;
+    }
+    await ScanRun.updateOne({ _id: scanId, 'sources.name': name }, { $set });
+}
+
+/** Patch top-level scan fields atomically, for the same reason. */
+const patchScan = (scanId, $set) => ScanRun.updateOne({ _id: scanId }, { $set });
+
+/**
+ * Persist a batch of scraped jobs and ATS-score them.
+ *
+ * Called once per phase rather than once at the end. Councils can take up to 15
+ * minutes, and holding the fast sources' results in memory until they finished
+ * meant the UI sat on "Scanning…" with an empty list even though 100+ jobs had
+ * already been found.
+ *
+ * @returns {Promise<number>} how many jobs were scored in this batch
+ */
+async function persistAndScore({ scanId, userEmail, jobs, roles, resumeText, summary }) {
+    // Dedupe within the batch, preferring the richest description.
+    const merged = new Map();
+    for (const job of jobs) {
+        const key = job.applyUrl || `${norm(job.title)}|${norm(job.company)}`;
+        const existing = merged.get(key);
+        if (!existing || (job.description?.length || 0) > (existing.description?.length || 0)) merged.set(key, job);
+    }
+
+    const dismissed = new Set(
+        (await DiscoveredJob.find({ userEmail, status: 'dismissed' }).select('applyUrl').lean())
+            .map((d) => d.applyUrl).filter(Boolean)
+    );
+
+    const docs = [];
+    for (const job of merged.values()) {
+        if (job.applyUrl && dismissed.has(job.applyUrl)) continue;
+        const query = job.applyUrl
+            ? { userEmail, applyUrl: job.applyUrl }
+            : { userEmail, title: job.title, company: job.company };
+        const doc = await DiscoveredJob.findOneAndUpdate(
+            query,
+            { $set: { ...job, userEmail }, $setOnInsert: { status: 'new', discoveredAt: new Date() } },
+            { upsert: true, new: true }
+        ).catch((e) => { console.warn('[Radar] upsert failed:', e.message); return null; });
+        if (doc) docs.push(doc);
+    }
+
+    // Jobs are now queryable, so the UI can show them while scoring continues.
+    await ScanRun.updateOne({ _id: scanId }, { $inc: { totalFound: docs.length } });
+
+    const toScore = docs
+        .filter((d) => d.matchScore == null && roughlyRelevant(d, roles))
+        .slice(0, MAX_SCORED_PER_SCAN);
+
+    let scored = 0;
+    for (let i = 0; i < toScore.length; i += SCORE_BATCH) {
+        const batch = toScore.slice(i, i + SCORE_BATCH);
+        try {
+            const scores = await scoreBatch(batch, resumeText, summary);
+            // Distinct documents, so saving them together is safe.
+            await Promise.all(batch.map((doc, idx) => {
+                const s = scores[idx];
+                if (!s) return null;
+                doc.matchScore = Math.max(0, Math.min(100, Number(s.matchScore) || 0));
+                doc.matchedSkills = (s.matchedSkills || []).slice(0, 6);
+                doc.missingSkills = (s.missingSkills || []).slice(0, 4);
+                doc.matchSummary = s.summary || '';
+                doc.scoredAt = new Date();
+                return doc.save();
+            }));
+            scored += batch.length;
+            await ScanRun.updateOne({ _id: scanId }, { $inc: { totalScored: batch.length } });
+        } catch (err) {
+            // Out of LLM quota, or a transient failure: the jobs are already
+            // saved, they simply stay unscored rather than sinking the scan.
+            console.warn('[Radar] scoring batch failed:', err.message);
+            if (isQuotaError(err)) {
+                console.warn('[Radar] skipping remaining scoring for this scan — no LLM quota.');
+                break;
+            }
+        }
+    }
+
+    return scored;
 }
 
 async function execute(scanId) {
     const scan = await ScanRun.findById(scanId);
+    if (!scan) throw new Error(`Scan ${scanId} no longer exists.`);
     const profile = await UserProfile.findOne({ email: scan.userEmail });
     const roles = scan.roles;
     const primaryRole = roles[0];
+    const userEmail = scan.userEmail;
+
+    // Resume text is read once and reused by every scoring batch.
+    let resumeText = '';
+    if (profile?.resumePath) resumeText = await parseResume(profile.resumePath);
+    const summary = profileSummary(profile);
+    const scoreArgs = { scanId, userEmail, roles, resumeText, summary };
 
     // ── 1. Fast/API sources in parallel (one query per source using the primary
     //       role; JSearch additionally covers the expanded roles since it's cheap) ──
@@ -121,110 +244,62 @@ async function execute(scanId) {
     };
 
     const active = scan.sources.map((s) => s.name);
-    const found = [];
+    let totalScored = 0;
 
     const fastNames = Object.keys(connectors).filter((n) => active.includes(n));
-    for (const name of fastNames) await setSource(scan, name, { status: 'running' });
+    for (const name of fastNames) await setSource(scanId, name, { status: 'running' });
 
     const fastResults = await Promise.all(fastNames.map(async (name) => {
         const result = await safeSearch(name, connectors[name]);
-        await setSource(scan, name, {
+        await setSource(scanId, name, {
             status: result.ok ? 'done' : 'failed',
             found: result.jobs.length,
             error: result.error,
         });
         return result.jobs;
     }));
-    found.push(...fastResults.flat());
+
+    // Save these now — councils below can run for another 15 minutes.
+    totalScored += await persistAndScore({ ...scoreArgs, jobs: fastResults.flat() });
 
     // ── 2. Councils (slow, batched, with live progress) ──
     if (active.includes('council')) {
-        await setSource(scan, 'council', { status: 'running' });
+        await setSource(scanId, 'council', { status: 'running' });
         const result = await safeSearch('council', () => searchCouncils({
             roles,
-            onProgress: async (p) => {
-                scan.councilProgress = { done: p.done, total: p.total, unreachable: p.unreachable.slice(0, 40) };
-                await scan.save();
-            },
+            onProgress: (p) => patchScan(scanId, {
+                councilProgress: { done: p.done, total: p.total, unreachable: p.unreachable.slice(0, 40) },
+            }),
         }), 15 * 60 * 1000); // councils get a much larger budget
-        await setSource(scan, 'council', {
+        await setSource(scanId, 'council', {
             status: result.ok ? 'done' : 'failed',
             found: result.jobs.length,
             error: result.error,
         });
-        found.push(...result.jobs);
+        totalScored += await persistAndScore({ ...scoreArgs, jobs: result.jobs });
     }
 
-    // ── 3. Merge, dedupe, upsert ──
-    const merged = new Map();
-    for (const job of found) {
-        const key = job.applyUrl || `${norm(job.title)}|${norm(job.company)}`;
-        const existing = merged.get(key);
-        if (!existing || (job.description?.length || 0) > (existing.description?.length || 0)) merged.set(key, job);
-    }
-
-    const dismissed = new Set(
-        (await DiscoveredJob.find({ userEmail: scan.userEmail, status: 'dismissed' }).select('applyUrl').lean())
-            .map((d) => d.applyUrl).filter(Boolean)
-    );
-
-    const docs = [];
-    for (const job of merged.values()) {
-        if (job.applyUrl && dismissed.has(job.applyUrl)) continue;
-        const query = job.applyUrl
-            ? { userEmail: scan.userEmail, applyUrl: job.applyUrl }
-            : { userEmail: scan.userEmail, title: job.title, company: job.company };
-        const doc = await DiscoveredJob.findOneAndUpdate(
-            query,
-            { $set: { ...job, userEmail: scan.userEmail }, $setOnInsert: { status: 'new', discoveredAt: new Date() } },
-            { upsert: true, new: true }
-        ).catch((e) => { console.warn('[Radar] upsert failed:', e.message); return null; });
-        if (doc) docs.push(doc);
-    }
-
-    scan.totalFound = docs.length;
-    await scan.save();
-
-    // ── 4. ATS scoring, batched, relevance-filtered, capped ──
-    let resumeText = '';
-    if (profile?.resumePath) resumeText = await parseResume(profile.resumePath);
-    const summary = profileSummary(profile);
-
-    const toScore = docs
-        .filter((d) => d.matchScore == null && roughlyRelevant(d, roles))
-        .slice(0, MAX_SCORED_PER_SCAN);
-
-    for (let i = 0; i < toScore.length; i += SCORE_BATCH) {
-        const batch = toScore.slice(i, i + SCORE_BATCH);
-        try {
-            const scores = await scoreBatch(batch, resumeText, summary);
-            await Promise.all(batch.map((doc, idx) => {
-                const s = scores[idx];
-                if (!s) return null;
-                doc.matchScore = Math.max(0, Math.min(100, Number(s.matchScore) || 0));
-                doc.matchedSkills = (s.matchedSkills || []).slice(0, 6);
-                doc.missingSkills = (s.missingSkills || []).slice(0, 4);
-                doc.matchSummary = s.summary || '';
-                doc.scoredAt = new Date();
-                return doc.save();
-            }));
-            scan.totalScored = Math.min(i + SCORE_BATCH, toScore.length);
-            await scan.save();
-        } catch (err) {
-            console.warn('[Radar] scoring batch failed:', err.message);
-        }
-    }
-
-    scan.status = 'done';
-    scan.finishedAt = new Date();
-    await scan.save();
-    console.log(`[Radar] Scan ${scan._id} done: ${scan.totalFound} found, ${scan.totalScored} scored.`);
+    const finalCounts = await ScanRun.findById(scanId).select('totalFound totalScored').lean();
+    await patchScan(scanId, { status: 'done', finishedAt: new Date() });
+    console.log(`[Radar] Scan ${scanId} done: ${finalCounts?.totalFound ?? 0} found, ${finalCounts?.totalScored ?? 0} scored.`);
 }
 
 /** Start a scan for a user. Rejects if one is already running. */
 export async function startScan({ userEmail, sources }) {
-    if (running.has(userEmail)) throw Object.assign(new Error('A scan is already running for this user.'), { status: 409 });
+    // Councils alone can run ~15 minutes, so the lock gets a generous TTL.
+    if (!(await acquireLock(scanLockKey(userEmail), { ttlMs: 45 * 60 * 1000 }))) {
+        throw Object.assign(new Error('A scan is already running for this user.'), { status: 409 });
+    }
 
+    try {
+        return await beginScan({ userEmail, sources });
+    } catch (err) {
+        await releaseLock(scanLockKey(userEmail)); // nothing was started
+        throw err;
+    }
+}
+
+async function beginScan({ userEmail, sources }) {
     const profile = await UserProfile.findOne({ email: userEmail });
     if (!profile) throw Object.assign(new Error('Profile not found — set up your profile (with target roles) first.'), { status: 404 });
     if (!profile.targetRoles?.trim()) {
@@ -246,10 +321,14 @@ export async function startScan({ userEmail, sources }) {
             console.error('[Radar] scan crashed:', err);
             await ScanRun.findByIdAndUpdate(scan._id, { status: 'failed', error: err.message, finishedAt: new Date() });
         })
-        .finally(() => running.delete(userEmail));
-    running.set(userEmail, promise);
+        .finally(async () => {
+            localScans.delete(userEmail);
+            await releaseLock(scanLockKey(userEmail));
+        });
+    localScans.set(userEmail, promise);
 
     return scan;
 }
 
-export const isScanning = (userEmail) => running.has(userEmail);
+export const isScanning = async (userEmail) =>
+    localScans.has(userEmail) || isLocked(scanLockKey(userEmail));

@@ -33,14 +33,35 @@ export function describeAxiosError(err) {
     return err?.message || 'Unknown error';
 }
 
+/**
+ * Extract text from a PDF buffer.
+ *
+ * pdf-parse v2 exports a `PDFParse` class, not a callable. The previous code
+ * invoked the module as a function, which threw on every call — and because the
+ * only caller swallowed the error and returned '', every resume in the system
+ * silently parsed as empty. Keep this the single place that knows the PDF API.
+ *
+ * @throws if the buffer is not a readable PDF
+ */
+export async function extractPdfText(buffer) {
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: buffer });
+    try {
+        const { text } = await parser.getText();
+        return text || '';
+    } finally {
+        await parser.destroy?.().catch?.(() => { /* already released */ });
+    }
+}
+
 /** Extract text from an uploaded PDF resume (empty string on failure, with a log). */
 export async function parseResume(resumePath) {
     try {
-        const { createRequire } = await import('module');
-        const require = createRequire(import.meta.url);
-        const pdfParse = require('pdf-parse');
-        const parsed = await pdfParse(fs.readFileSync(resumePath));
-        return parsed.text.slice(0, 4000);
+        const text = await extractPdfText(fs.readFileSync(resumePath));
+        if (!text.trim()) {
+            console.warn(`[parseResume] ${path.basename(resumePath)} produced no text — is it a scanned image?`);
+        }
+        return text.slice(0, 4000);
     } catch (err) {
         console.error(`[parseResume] Could not read ${resumePath}:`, err.message);
         return '';
@@ -114,6 +135,9 @@ export async function buildOptimizedResume({ jobDescription, profile, outPath })
                 job_description: jobDescription,
                 resume_text: resumeText || undefined,
                 profile_summary: profileSummary(profile) || undefined,
+                // Scopes the optimizer's saved-resume fallback to this account.
+                // Without it the optimizer would fall back to another user's resume.
+                user_email: profile?.email || undefined,
             },
             { timeout: 120000 }
         );
@@ -169,7 +193,16 @@ export function getOptimizedResumeForJob(jobDescription, profile) {
         optimCache.delete(key);
     }
 
-    const entry = { status: 'pending', promise: null, result: null, error: null, createdAt: Date.now() };
+    // userEmail is recorded so the HTTP layer can refuse to serve one user's
+    // optimized CV to another account.
+    const entry = {
+        status: 'pending',
+        promise: null,
+        result: null,
+        error: null,
+        createdAt: Date.now(),
+        userEmail: profile?.email || null,
+    };
     entry.promise = buildOptimizedResume({ jobDescription, profile }).then((result) => {
         entry.status = result.ok ? 'done' : 'failed';
         entry.result = result.ok ? result : null;

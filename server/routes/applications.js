@@ -4,54 +4,48 @@ import fs from 'fs';
 import JobApplication from '../models/JobApplication.js';
 import { transition, IllegalTransitionError } from '../services/applicationFsm.js';
 import { runPipeline, retryFrom, sendDraft, isRunning } from '../services/pipeline.js';
+import { requireAuth, currentEmail, loadOwnedApplication } from '../middleware/auth.js';
 
 const router = express.Router();
+
+// Every route below operates on the caller's own applications.
+router.use(requireAuth);
 
 const handle = (fn) => async (req, res) => {
     try {
         await fn(req, res);
     } catch (err) {
-        const status = err instanceof IllegalTransitionError ? err.status : 500;
+        const status = err.status || (err instanceof IllegalTransitionError ? err.status : 500);
         if (status === 500) console.error('[Applications]', err);
         res.status(status).json({ message: err.message });
     }
 };
 
-const withRunning = (app) => ({ ...app.toObject(), isRunning: isRunning(app._id) });
+const withRunning = async (app) => ({ ...app.toObject(), isRunning: await isRunning(app._id) });
 
-async function loadApp(req) {
-    const app = await JobApplication.findById(req.params.id);
-    if (!app) {
-        const err = new Error('Application not found.');
-        err.status = 404;
-        throw err;
-    }
-    return app;
-}
+const loadApp = loadOwnedApplication;
 
-// GET /api/applications?userEmail=&status=
+// GET /api/applications?status=
 router.get('/', handle(async (req, res) => {
-    const { userEmail, status } = req.query;
-    if (!userEmail) return res.status(400).json({ message: 'userEmail is required.' });
-
-    const query = { userEmail };
+    const { status } = req.query;
+    const query = { userEmail: currentEmail(req) };
     if (status) query.status = { $in: String(status).split(',') };
 
     const applications = await JobApplication.find(query).sort({ updatedAt: -1 }).limit(100);
-    res.json({ applications: applications.map(withRunning) });
+    res.json({ applications: await Promise.all(applications.map(withRunning)) });
 }));
 
 // GET /api/applications/:id — polled by the pipeline stepper
 router.get('/:id', handle(async (req, res) => {
     const app = await loadApp(req);
-    res.json({ application: withRunning(app) });
+    res.json({ application: await withRunning(app) });
 }));
 
 // POST /api/applications/:id/apply-clicked — user opened the company's site
 router.post('/:id/apply-clicked', handle(async (req, res) => {
     const app = await loadApp(req);
     await transition(app, 'applying', { appliedAt: new Date() });
-    res.json({ application: withRunning(app) });
+    res.json({ application: await withRunning(app) });
 }));
 
 // POST /api/applications/:id/approve — user finished applying; start the pipeline
@@ -67,14 +61,14 @@ router.post('/:id/approve', handle(async (req, res) => {
     });
 
     runPipeline(app._id); // runs in the background; the UI polls GET /:id
-    res.json({ application: withRunning(app), message: 'Approved — building your job-matched CV.' });
+    res.json({ application: await withRunning(app), message: 'Approved — building your job-matched CV.' });
 }));
 
 // POST /api/applications/:id/deny
 router.post('/:id/deny', handle(async (req, res) => {
     const app = await loadApp(req);
     await transition(app, 'denied', { deniedAt: new Date() });
-    res.json({ application: withRunning(app) });
+    res.json({ application: await withRunning(app) });
 }));
 
 // POST /api/applications/:id/retry — re-run a failed step and everything after it
@@ -84,14 +78,22 @@ router.post('/:id/retry', handle(async (req, res) => {
     if (!step) return res.status(400).json({ message: 'No failed step to retry.' });
 
     retryFrom(app, step);
-    res.json({ message: `Retrying "${step}".`, application: withRunning(app) });
+    res.json({ message: `Retrying "${step}".`, application: await withRunning(app) });
 }));
 
 // POST /api/applications/:id/send — Review & Send from the drafted email
 router.post('/:id/send', handle(async (req, res) => {
     const app = await loadApp(req);
-    if (!['email_drafted', 'contacts_found', 'email_failed'].includes(app.status)) {
+    if (!['email_drafted', 'email_failed'].includes(app.status)) {
         return res.status(409).json({ message: `Application is "${app.status}" — there is no draft ready to send.` });
+    }
+
+    // "contacts_found" used to be accepted here, but the draft is written by the
+    // *next* step — so sending from that state mailed an empty body.
+    const body = req.body?.body ?? app.email?.body;
+    const subject = req.body?.subject ?? app.email?.subject;
+    if (!body?.trim() || !subject?.trim()) {
+        return res.status(409).json({ message: 'This application has no drafted subject and body to send.' });
     }
 
     const result = await sendDraft(app, req.body || {});
@@ -101,7 +103,7 @@ router.post('/:id/send', handle(async (req, res) => {
             ? `Sent to ${result.sentTo.length} recipient(s) — no resume was attached (none available).`
             : `Sent to ${result.sentTo.length} recipient(s).`,
         ...result,
-        application: withRunning(refreshed),
+        application: await withRunning(refreshed),
     });
 }));
 

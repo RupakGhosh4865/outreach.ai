@@ -1,6 +1,28 @@
 .env*
+# The template carries no secrets and must be tracked.
+!.env.example
+
 node_modules/
 .vscode/
 *.log
+
+# Uploaded resumes and generated CVs
 server/uploads/
+server/tmp/
+
+# Next.js build output
+client/.next/
+client/out/
+
+# Python
+__pycache__/
+*.pyc
+
+# ResumeOptimiser is its own git repository (Resume-saas), committed and pushed
+# separately. It is excluded here so the parent repo doesn't turn it into a
+# stray submodule pointer.
 ResumeOptimiser/
+
+# Build artefacts / packaged extension
+*.zip
+*.exe

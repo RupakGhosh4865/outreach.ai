@@ -1,6 +1,6 @@
 {
     "manifest_version": 3,
-    "name": "Outreach.ai \u2014 Job Outreach Automator",
+    "name": "Outreach.ai — Job Outreach Automator",
     "version": "1.0.0",
     "description": "1-click outreach from any LinkedIn job post",
     "content_security_policy": {
@@ -19,7 +19,8 @@
     ],
     "host_permissions": [
         "https://www.linkedin.com/*",
-        "http://localhost:3000/*"
+        "http://localhost:3000/*",
+        "https://app.outreach.ai/*"
     ],
     "background": {
         "service_worker": "background.js"

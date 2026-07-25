@@ -4,8 +4,12 @@ import path from 'path';
 
 import JobApplication from '../models/JobApplication.js';
 import { ingestJobUrl, ingestJobText, extractUrls } from '../services/scrape.js';
+import { extractPdfText } from '../services/resume.js';
+import { requireAuth, currentEmail } from '../middleware/auth.js';
 
 const router = express.Router();
+
+router.use(requireAuth);
 
 const upload = multer({
     storage: multer.memoryStorage(),
@@ -22,12 +26,7 @@ async function textFromUpload(file) {
     const ext = path.extname(file.originalname).toLowerCase();
     if (ext === '.txt' || ext === '.csv') return file.buffer.toString('utf-8');
 
-    if (ext === '.pdf') {
-        const { createRequire } = await import('module');
-        const require = createRequire(import.meta.url);
-        const pdfParse = require('pdf-parse');
-        return (await pdfParse(file.buffer)).text;
-    }
+    if (ext === '.pdf') return extractPdfText(file.buffer);
 
     if (ext === '.docx') {
         const { default: mammoth } = await import('mammoth');
@@ -71,8 +70,7 @@ export async function upsertApplication(userEmail, job, source) {
 // POST /api/job-sources/ingest — urls[], text, and/or an uploaded document
 router.post('/ingest', upload.single('document'), async (req, res) => {
     try {
-        const userEmail = req.body.userEmail;
-        if (!userEmail) return res.status(400).json({ message: 'userEmail is required.' });
+        const userEmail = currentEmail(req);
 
         let urls = req.body.urls || [];
         if (typeof urls === 'string') urls = extractUrls(urls);
@@ -126,12 +124,12 @@ router.post('/ingest', upload.single('document'), async (req, res) => {
 // POST /api/job-sources/from-search — adopt a job already structured by UK search
 router.post('/from-search', async (req, res) => {
     try {
-        const { userEmail, job } = req.body;
-        if (!userEmail || !job?.applyUrl) {
-            return res.status(400).json({ message: 'userEmail and job.applyUrl are required.' });
+        const { job } = req.body;
+        if (!job?.applyUrl) {
+            return res.status(400).json({ message: 'job.applyUrl is required.' });
         }
 
-        const application = await upsertApplication(userEmail, {
+        const application = await upsertApplication(currentEmail(req), {
             jobTitle: job.title || job.jobTitle || '',
             companyName: job.company || job.companyName || '',
             location: job.location || '',
@@ -151,7 +149,7 @@ router.post('/from-search', async (req, res) => {
 // POST /api/job-sources/:id/validate — re-check whether a job is still open
 router.post('/:id/validate', async (req, res) => {
     try {
-        const app = await JobApplication.findById(req.params.id);
+        const app = await JobApplication.findOne({ _id: req.params.id, userEmail: currentEmail(req) });
         if (!app) return res.status(404).json({ message: 'Application not found.' });
         if (!app.applyUrl) return res.status(400).json({ message: 'This job has no URL to re-check.' });
 

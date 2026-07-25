@@ -1,9 +1,12 @@
+# Local development. Source is bind-mounted and each service runs its watcher.
+# For a production-shaped run use docker-compose.prod.yml.
+
 services:
   client:
     build:
       context: ./client
       dockerfile: Dockerfile
-    image: my-fullstack-app-client
+    image: outreachai-client-dev
     ports:
       - "3000:3000"
     volumes:
@@ -13,19 +16,67 @@ services:
     environment:
       - CHOKIDAR_USEPOLLING=true
       - WATCHPACK_POLLING=true
+      - NEXT_PUBLIC_API_URL=http://localhost:5000
     command: npm run dev
+    depends_on:
+      - server
 
   server:
     build:
       context: ./server
       dockerfile: Dockerfile
-    image: my-fullstack-app-server
+    image: outreachai-server-dev
     ports:
       - "5000:5000"
     volumes:
       - ./server:/app
       - /app/node_modules
+      - server_uploads:/app/uploads
     command: npm run dev
-    environment: 
-   
+    environment:
+      # Required — the server refuses to start without these.
       - MONGODB_URL=${MONGODB_URL}
+      - JWT_SECRET=${JWT_SECRET}
+      - SESSION_SECRET=${SESSION_SECRET}
+      # Service wiring
+      - RESUME_OPTIMIZER_URL=http://optimizer:8002
+      - CLIENT_URL=http://localhost:3000
+      - CORS_ORIGINS=http://localhost:3000,http://localhost:3001
+      # Feature keys — absent means that feature degrades, not that boot fails.
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_FAST=${OPENAI_MODEL_FAST:-gpt-4o-mini}
+      - OPENAI_MODEL_QUALITY=${OPENAI_MODEL_QUALITY:-gpt-4o}
+      - HUNTER_API_KEY=${HUNTER_API_KEY}
+      - GMAIL_USER=${GMAIL_USER}
+      - GMAIL_APP_PASSWORD=${GMAIL_APP_PASSWORD}
+      - GOOGLE_CLIENT_ID=${GOOGLE_CLIENT_ID}
+      - GOOGLE_CLIENT_SECRET=${GOOGLE_CLIENT_SECRET}
+      - LINKEDIN_CLIENT_ID=${LINKEDIN_CLIENT_ID}
+      - LINKEDIN_CLIENT_SECRET=${LINKEDIN_CLIENT_SECRET}
+      - ADZUNA_APP_ID=${ADZUNA_APP_ID}
+      - ADZUNA_APP_KEY=${ADZUNA_APP_KEY}
+      - RAPIDAPI_KEY=${RAPIDAPI_KEY}
+      - ENABLE_REPLY_TRACKING=${ENABLE_REPLY_TRACKING:-false}
+    depends_on:
+      - optimizer
+
+  # The CV pipeline depends on this service. It was missing from compose
+  # entirely, so CV generation could never work in containers.
+  optimizer:
+    build:
+      context: ./ResumeOptimiser/backend
+      dockerfile: Dockerfile
+    image: outreachai-optimizer-dev
+    ports:
+      - "8002:8002"
+    volumes:
+      - optimizer_data:/app/data
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL_QUALITY=${OPENAI_MODEL_QUALITY:-gpt-4o}
+      - OPTIMIZER_ALLOWED_ORIGINS=http://localhost:5000
+      - DB_PATH=/app/data/resume_history.db
+
+volumes:
+  server_uploads:
+  optimizer_data:
