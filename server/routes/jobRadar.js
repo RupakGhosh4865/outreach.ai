@@ -37,9 +37,12 @@ router.get('/scan/:id', async (req, res) => {
 // GET /api/job-radar/jobs?minScore=&source=&status=
 router.get('/jobs', async (req, res) => {
     try {
-        const { minScore, source, status } = req.query;
+        const { minScore, source, status, includeApplied } = req.query;
         const query = { userEmail: currentEmail(req) };
-        query.status = status ? { $in: String(status).split(',') } : { $ne: 'dismissed' };
+        // Applied jobs are hidden by default — one job, one application. The UI's
+        // "Show applied" toggle opts back in.
+        const hidden = includeApplied === '1' ? ['dismissed'] : ['dismissed', 'applied'];
+        query.status = status ? { $in: String(status).split(',') } : { $nin: hidden };
         if (source) query.source = { $in: String(source).split(',') };
         if (minScore) query.matchScore = { $gte: Number(minScore) };
 

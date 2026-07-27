@@ -14,6 +14,7 @@ import UkJobFinder from '../components/UkJobFinder';
 import JobSources from '../components/JobSources';
 import JobRadar from '../components/JobRadar';
 import ApplicationPipeline from '../components/ApplicationPipeline';
+import ApplyTimer from '../components/ApplyTimer';
 import {
     Alert, Badge, Button, Card, CardTitle, Field, Input, Textarea, cn,
 } from '../components/ui';
@@ -193,9 +194,28 @@ export default function OutreachPage() {
     const [applyTiming, setApplyTiming] = useState('now'); // 'now' | 'schedule'
     const [scheduledAt, setScheduledAt] = useState('');
 
+    // Attribution + timing. `applyStartedAt` is set the moment real work begins
+    // and reported on send, so History can show how long the application took.
+    const [teamMembers, setTeamMembers] = useState([]);
+    const [ownerName, setOwnerName] = useState('');
+    const [appliedBy, setAppliedBy] = useState(''); // '' = the account owner
+    const [applyStartedAt, setApplyStartedAt] = useState(null);
+    const [alreadyApplied, setAlreadyApplied] = useState(null);
+
+    /** Start the apply clock on first real action; later calls are no-ops. */
+    const beginApply = () => setApplyStartedAt((prev) => prev || new Date().toISOString());
+
     useEffect(() => {
         const saved = localStorage.getItem('jobreach_email');
         if (saved) setUserEmail(saved);
+
+        apiGet('/api/profile')
+            .then((d) => {
+                if (!d?.profile) return;
+                setTeamMembers((d.profile.teamMembers || []).map((m) => m.name));
+                setOwnerName(d.profile.name || '');
+            })
+            .catch(() => { /* no profile yet — attribution just stays as the owner */ });
 
         // Detect if loaded from Chrome Extension
         const params = new URLSearchParams(window.location.search);
@@ -258,6 +278,8 @@ export default function OutreachPage() {
             addToast('Please paste a LinkedIn job URL first.', 'error'); return;
         }
         setScraping(true);
+        setAlreadyApplied(null);
+        beginApply();
         try {
             const data = await apiPost('/api/jobs/extract-from-url', { url: linkedinUrl });
 
@@ -275,7 +297,13 @@ export default function OutreachPage() {
             }
             if (data.companyName) fetchHistoryContacts(data.companyName);
         } catch (e) {
-            addToast(e.message || 'Connection error during extraction.', 'error');
+            // 409 means this exact posting is already in the applied ledger.
+            // Surface it as a banner, not a toast — it's a stop, not a hiccup.
+            if (e instanceof ApiError && e.status === 409 && e.data?.alreadyApplied) {
+                setAlreadyApplied(e.data);
+            } else {
+                addToast(e.message || 'Connection error during extraction.', 'error');
+            }
         }
         setScraping(false);
     }
@@ -286,14 +314,25 @@ export default function OutreachPage() {
         optimizeJdRef.current = jd.trim();
         if (optimizePollRef.current) clearInterval(optimizePollRef.current);
 
+        // Load the user's own CV layout so the panel can show the real document
+        // being rewritten rather than an abstract progress bar. Absent for
+        // accounts whose resume predates template derivation.
+        const templatePromise = apiGet('/api/jobs/resume-template')
+            .then((d) => d.layout)
+            .catch(() => null);
+
         try {
             const data = await apiPost('/api/jobs/optimize-resume', { jobDescription: jd });
+            const template = await templatePromise;
 
             if (data.status === 'done') {
-                setOptimizeState({ key: data.key, status: 'done', result: data.result });
+                setOptimizeState({ key: data.key, status: 'done', result: data.result, template });
                 return;
             }
-            setOptimizeState({ key: data.key, status: 'pending' });
+            setOptimizeState({
+                key: data.key, status: 'pending', template,
+                percent: data.percent ?? 5, stageLabel: data.stageLabel || 'Reading your CV',
+            });
 
             let polls = 0;
             optimizePollRef.current = setInterval(async () => {
@@ -302,14 +341,20 @@ export default function OutreachPage() {
                     const sd = await apiGet(`/api/jobs/optimize-resume/status?key=${data.key}`);
                     if (sd.status === 'done') {
                         clearInterval(optimizePollRef.current);
-                        setOptimizeState({ key: data.key, status: 'done', result: sd.result });
-                        addToast('Dynamic CV ready for this job!', 'success');
-                    } else if (sd.status === 'failed' || polls > 24) {
+                        setOptimizeState({ key: data.key, status: 'done', result: sd.result, template });
+                        addToast('Tailored CV ready for this job!', 'success');
+                    } else if (sd.status === 'failed' || polls > 80) {
                         clearInterval(optimizePollRef.current);
-                        setOptimizeState({ key: data.key, status: 'failed' });
+                        setOptimizeState({ key: data.key, status: 'failed', template });
+                    } else {
+                        setOptimizeState((prev) => ({
+                            ...prev, key: data.key, status: 'pending', template,
+                            percent: sd.percent ?? prev?.percent ?? 5,
+                            stageLabel: sd.stageLabel || prev?.stageLabel,
+                        }));
                     }
                 } catch { /* keep polling until cap */ }
-            }, 5000);
+            }, 3000);
         } catch {
             setOptimizeState({ status: 'failed' });
         }
@@ -394,6 +439,9 @@ export default function OutreachPage() {
 
     // ── Step 2: Find Employees ───────────────────────────────────────────────
     async function handleFindEmployees() {
+        // Also starts the clock for a fully manual application, where neither
+        // URL extraction nor autopilot ran.
+        beginApply();
         setFindingEmps(true);
         try {
             const data = await apiPost('/api/jobs/find-employees', { companyName, companyDomain });
@@ -428,6 +476,7 @@ export default function OutreachPage() {
 
     async function goToStep3() {
         if (!step2Valid()) { addToast('Select at least one employee or add a manual email.', 'error'); return; }
+        beginApply();
         setStep(2);
         setVariants([]);
         setSelectedVariant(null);
@@ -483,6 +532,8 @@ export default function OutreachPage() {
                 linkedinUrl, companyName, jobTitle, jobDescription, emailType, extraContext,
                 manualEmail, manualPhone, employees, followUpDays,
                 scheduledAt: applyTiming === 'schedule' ? scheduledAt : null,
+                appliedBy: appliedBy || undefined,
+                applyStartedAt: applyStartedAt || undefined,
             });
             setResumeOptimizing(false);
 
@@ -517,6 +568,8 @@ export default function OutreachPage() {
         setAutoMode(mode);
         setAutoStep(1);
         setLimitReached(false);
+        setAlreadyApplied(null);
+        beginApply();
 
         // The request genuinely takes a while (scrape → LLM → Hunter → CV → one
         // email per contact), so the stepper advances on a timer to show progress.
@@ -575,6 +628,9 @@ export default function OutreachPage() {
             if (err instanceof ApiError && err.status === 403) {
                 setLimitReached(true);
                 addToast('Monthly limit reached — upgrade to keep going.', 'error');
+            } else if (err instanceof ApiError && err.status === 409 && err.data?.alreadyApplied) {
+                // Already in the applied ledger — stop rather than sending twice.
+                setAlreadyApplied(err.data);
             } else {
                 addToast(err.message || 'Autopilot failed.', 'error');
             }
@@ -607,6 +663,26 @@ export default function OutreachPage() {
                         </Link>{' '}
                         so we can personalise your emails.
                     </Alert>
+                )}
+
+                {/* One job, one application: this posting is already in the ledger. */}
+                {alreadyApplied && (
+                    <Alert tone="warning" className="mb-6">
+                        <span className="font-semibold">You&apos;ve already applied to this job.</span>{' '}
+                        {alreadyApplied.jobTitle || 'This role'}
+                        {alreadyApplied.companyName ? ` at ${alreadyApplied.companyName}` : ''} was applied for on{' '}
+                        {new Date(alreadyApplied.appliedAt).toLocaleDateString()}
+                        {alreadyApplied.appliedBy ? ` by ${alreadyApplied.appliedBy}` : ''}.{' '}
+                        <Link href="/history" className="font-semibold underline underline-offset-2">
+                            See it in History
+                        </Link>
+                    </Alert>
+                )}
+
+                {applyStartedAt && (
+                    <div className="mb-4 flex justify-end">
+                        <ApplyTimer startedAt={applyStartedAt} />
+                    </div>
                 )}
 
                 <Stepper step={step} />
@@ -1112,6 +1188,36 @@ export default function OutreachPage() {
                                             </ul>
                                         )}
                                     </div>
+
+                                    {/* Only shown once the owner has registered someone —
+                                        otherwise every application is simply theirs. */}
+                                    {teamMembers.length > 0 && (
+                                        <fieldset className="mb-6">
+                                            <legend className="ui-label">Applying on behalf of</legend>
+                                            <div className="flex flex-wrap gap-2">
+                                                {[{ value: '', label: ownerName ? `${ownerName} (you)` : 'You' },
+                                                  ...teamMembers.map((m) => ({ value: m, label: m }))].map((opt) => (
+                                                    <button
+                                                        key={opt.value || 'owner'}
+                                                        type="button"
+                                                        onClick={() => setAppliedBy(opt.value)}
+                                                        aria-pressed={appliedBy === opt.value}
+                                                        className={cn(
+                                                            'tap min-h-10 rounded-lg border px-3.5 text-sm font-semibold transition-colors duration-150',
+                                                            appliedBy === opt.value
+                                                                ? 'border-brand/50 bg-brand/12 text-brand'
+                                                                : 'border-white/10 bg-white/2 text-muted hover:border-white/25',
+                                                        )}
+                                                    >
+                                                        {opt.label}
+                                                    </button>
+                                                ))}
+                                            </div>
+                                            <p className="ui-hint">
+                                                The email, resume and sender stay yours — this only records who pressed send.
+                                            </p>
+                                        </fieldset>
+                                    )}
 
                                     <fieldset className="mb-6">
                                         <legend className="ui-label">Automatic follow-up</legend>

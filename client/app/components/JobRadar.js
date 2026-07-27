@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-    Building2, CalendarClock, Check, Clock, ExternalLink, MapPin, Radar,
+    Building2, CalendarClock, Check, CheckCheck, Clock, ExternalLink, MapPin, Radar,
     ShieldCheck, Star, X,
 } from 'lucide-react';
 import { Alert, Badge, Button, Card, CardTitle, EmptyState, Select, cn } from './ui';
@@ -59,15 +59,21 @@ export default function JobRadar({ userEmail, isExtension, onApplicationChange }
     const [starting, setStarting] = useState(false);
     const [expanded, setExpanded] = useState('');
     const [minScore, setMinScore] = useState(0);
+    // Jobs already applied to are hidden by default — one job, one application.
+    const [showApplied, setShowApplied] = useState(false);
     const pollRef = useRef(null);
 
     const loadJobs = useCallback(async () => {
         if (!userEmail) return;
         try {
-            const data = await apiGet(`/api/job-radar/jobs${minScore ? `?minScore=${minScore}` : ''}`);
+            const params = new URLSearchParams();
+            if (minScore) params.set('minScore', String(minScore));
+            if (showApplied) params.set('includeApplied', '1');
+            const query = params.toString();
+            const data = await apiGet(`/api/job-radar/jobs${query ? `?${query}` : ''}`);
             setJobs(data.jobs || []);
         } catch { /* transient — next poll retries */ }
-    }, [userEmail, minScore]);
+    }, [userEmail, minScore, showApplied]);
 
     useEffect(() => { loadJobs(); }, [loadJobs]);
 
@@ -218,22 +224,35 @@ export default function JobRadar({ userEmail, isExtension, onApplicationChange }
                 </div>
             )}
 
-            {/* Filter */}
-            {jobs.length > 0 && (
-                <div className="mb-3 flex items-center justify-between gap-3">
+            {/* Filter. Rendered whenever a scan exists, not only when jobs are
+                showing — otherwise hiding every result would also hide the
+                "Show applied" toggle needed to get them back. */}
+            {(jobs.length > 0 || scan) && (
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                     <p className="text-sm text-subtle" data-numeric>{filtered.length} job(s)</p>
-                    <label className="flex items-center gap-2 text-sm">
-                        <span className="sr-only">Minimum match score</span>
-                        <Select
-                            value={minScore}
-                            onChange={(e) => setMinScore(Number(e.target.value))}
-                            className="min-h-9 w-auto py-1.5 text-sm"
-                        >
-                            <option value={0}>All scores</option>
-                            <option value={40}>Score ≥ 40</option>
-                            <option value={70}>Score ≥ 70</option>
-                        </Select>
-                    </label>
+                    <div className="flex items-center gap-3">
+                        <label className="flex cursor-pointer items-center gap-2 text-sm text-muted">
+                            <input
+                                type="checkbox"
+                                checked={showApplied}
+                                onChange={(e) => setShowApplied(e.target.checked)}
+                                className="size-4 accent-brand"
+                            />
+                            Show applied
+                        </label>
+                        <label className="flex items-center gap-2 text-sm">
+                            <span className="sr-only">Minimum match score</span>
+                            <Select
+                                value={minScore}
+                                onChange={(e) => setMinScore(Number(e.target.value))}
+                                className="min-h-9 w-auto py-1.5 text-sm"
+                            >
+                                <option value={0}>All scores</option>
+                                <option value={40}>Score ≥ 40</option>
+                                <option value={70}>Score ≥ 70</option>
+                            </Select>
+                        </label>
+                    </div>
                 </div>
             )}
 
@@ -300,6 +319,11 @@ export default function JobRadar({ userEmail, isExtension, onApplicationChange }
                                         )}
                                         {job.status === 'shortlisted' && <Badge tone="warning" icon={Star}>Shortlisted</Badge>}
                                         {job.status === 'in_pipeline' && <Badge tone="success">In pipeline</Badge>}
+                                        {job.status === 'applied' && (
+                                            <Badge tone="neutral" icon={CheckCheck}>
+                                                Applied{fmtDate(job.appliedAt) ? ` · ${fmtDate(job.appliedAt)}` : ''}
+                                            </Badge>
+                                        )}
                                     </div>
 
                                     {(job.matchedSkills?.length > 0 || job.missingSkills?.length > 0) && (
@@ -336,12 +360,12 @@ export default function JobRadar({ userEmail, isExtension, onApplicationChange }
                                         <Button
                                             type="button"
                                             size="sm"
-                                            disabled={busy || job.status === 'in_pipeline'}
+                                            disabled={busy || job.status === 'in_pipeline' || job.status === 'applied'}
                                             loading={busy}
                                             onClick={() => jobAction(job, 'apply')}
                                         >
                                             {!busy && <ExternalLink className="size-3.5" aria-hidden="true" />}
-                                            Apply now
+                                            {job.status === 'applied' ? 'Already applied' : 'Apply now'}
                                         </Button>
                                         <Button type="button" size="sm" variant="secondary" disabled={busy} onClick={() => jobAction(job, 'shortlist')}>
                                             <Star className="size-3.5" aria-hidden="true" />

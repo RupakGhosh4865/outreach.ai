@@ -2,10 +2,15 @@
 
 import { useState } from 'react';
 import {
-    AlertTriangle, CheckCircle2, Download, Eye, Lightbulb, Loader2, Minus, Plus,
+    AlertTriangle, CheckCircle2, Download, Eye, Lightbulb, Minus, Plus,
 } from 'lucide-react';
 import { Alert, Badge, Button, Card, cn } from './ui';
+import ResumePreview from './ResumePreview';
 import { downloadAuthedFile, openAuthedFile } from '@/lib/api';
+
+// The optimizer still keys the two resume slots as 'genai'/'backend' internally;
+// the UI calls them Resume 1 and Resume 2.
+const SLOT_LABELS = { genai: 'Resume 1', backend: 'Resume 2' };
 
 /** Small pill for an added/removed keyword. */
 function Chip({ tone, children }) {
@@ -18,6 +23,26 @@ function Chip({ tone, children }) {
         >
             {children}
         </span>
+    );
+}
+
+/**
+ * Circular percentage indicator for the optimisation run.
+ *
+ * Uses the same conic-gradient approach as JobRadar's match ring so progress
+ * reads consistently across the app.
+ */
+function ProgressRing({ percent }) {
+    const value = Math.max(0, Math.min(100, Math.round(percent)));
+    return (
+        <div
+            className="relative grid size-14 shrink-0 place-items-center rounded-full transition-all duration-700"
+            style={{ background: `conic-gradient(var(--color-info) ${value * 3.6}deg, rgba(255,255,255,0.09) 0deg)` }}
+        >
+            <div className="grid size-11 place-items-center rounded-full bg-bg">
+                <span className="text-sm font-extrabold text-info" data-numeric>{value}</span>
+            </div>
+        </div>
     );
 }
 
@@ -55,21 +80,24 @@ export default function ResumeOptimizerPanel({ optimizeState, compact = false })
     };
 
     if (!optimizeState) return null;
-    const { status, key, result } = optimizeState;
+    const { status, key, result, template, percent = 5, stageLabel } = optimizeState;
 
     if (status === 'pending') {
         return (
-            <div
-                className="mb-4 flex items-center gap-3 rounded-xl border border-info/25 bg-info/8 px-4 py-3"
-                role="status"
-                aria-live="polite"
-            >
-                <Loader2 className="size-4 shrink-0 animate-spin text-info" aria-hidden="true" />
-                <p className="text-sm font-semibold text-info">
-                    Building a CV matched to this job…
-                    <span className="ml-1 font-normal opacity-80">usually 60–90 seconds</span>
-                </p>
-            </div>
+            <Card className="mb-4 border-info/25 bg-info/4">
+                <div className="mb-4 flex items-center gap-4" role="status" aria-live="polite">
+                    <ProgressRing percent={percent} />
+                    <div className="min-w-0">
+                        <p className="text-sm font-bold text-info">{stageLabel || 'Tailoring your CV'}</p>
+                        <p className="mt-0.5 text-xs text-muted">
+                            Rewriting the wording inside your own layout — structure, dates and
+                            employers stay exactly as they are.
+                        </p>
+                    </div>
+                </div>
+                {/* The user's real CV, so it's visible that only words change. */}
+                <ResumePreview layout={template} running />
+            </Card>
         );
     }
 
@@ -118,10 +146,36 @@ export default function ResumeOptimizerPanel({ optimizeState, compact = false })
 
             {fileError && <Alert tone="danger" className="mb-4">{fileError}</Alert>}
 
-            <div className={cn('mb-4 grid gap-3', compact ? 'grid-cols-1' : 'grid-cols-2')}>
-                <ScoreCard label="Gen AI" score={result.genaiScore} selected={winner === 'genai'} />
-                <ScoreCard label="Backend" score={result.backendScore} selected={winner === 'backend'} />
-            </div>
+            {/* Layout-preserving path only: shows the rewritten lines settling
+                into the user's own document. */}
+            {result.layout && (
+                <div className="mb-4">
+                    <ResumePreview layout={result.layout} changes={result.changes} />
+                    {result.changes?.length > 0 && (
+                        <p className="mt-2 text-xs text-subtle">
+                            <span className="font-semibold text-text" data-numeric>{result.changes.length}</span>{' '}
+                            line(s) rewritten · layout, dates and employers unchanged
+                        </p>
+                    )}
+                </div>
+            )}
+
+            {/* The layout-preserving path tailors one resume and returns a
+                single score; the legacy path scores both and picks a winner. */}
+            {result.layout ? (
+                <div className="mb-4">
+                    <ScoreCard
+                        label={`ATS match${SLOT_LABELS[winner] ? ` · ${SLOT_LABELS[winner]}` : ''}`}
+                        score={result.matchScore}
+                        selected
+                    />
+                </div>
+            ) : (
+                <div className={cn('mb-4 grid gap-3', compact ? 'grid-cols-1' : 'grid-cols-2')}>
+                    <ScoreCard label="Resume 1" score={result.genaiScore} selected={winner === 'genai'} />
+                    <ScoreCard label="Resume 2" score={result.backendScore} selected={winner === 'backend'} />
+                </div>
+            )}
 
             {result.addedKeywords?.length > 0 && (
                 <div className="mb-3">

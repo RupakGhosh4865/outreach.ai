@@ -26,8 +26,11 @@ const discoveredJobSchema = new mongoose.Schema({
     matchSummary: String,
     scoredAt: Date,
 
-    status: { type: String, enum: ['new', 'shortlisted', 'dismissed', 'in_pipeline'], default: 'new', index: true },
+    // 'applied' is terminal: the user has already sent an application for this
+    // posting, so it stays out of the radar list unless explicitly asked for.
+    status: { type: String, enum: ['new', 'shortlisted', 'dismissed', 'in_pipeline', 'applied'], default: 'new', index: true },
     applicationId: { type: mongoose.Schema.Types.ObjectId, ref: 'JobApplication', default: null },
+    appliedAt: { type: Date, default: null },
 
     discoveredAt: { type: Date, default: Date.now },
 }, { timestamps: true });

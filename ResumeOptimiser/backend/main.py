@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 import sqlite3
 from datetime import datetime
 
+from layout import derive_layout, editable_view, apply_rewrite, layout_to_text
+
 load_dotenv()
 
 app = FastAPI(title="AI Resume Optimizer API")
@@ -100,6 +102,18 @@ def init_db():
             PRIMARY KEY (user_email, variant)
         )
     ''')
+    # Layout map derived from the user's own resume PDF. Tailoring rewrites text
+    # inside this structure instead of generating a fresh document, which is what
+    # keeps the optimized CV looking like the one the user uploaded.
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS templates (
+            user_email TEXT NOT NULL,
+            variant TEXT NOT NULL,
+            layout_json TEXT,
+            derived_at DATETIME,
+            PRIMARY KEY (user_email, variant)
+        )
+    ''')
     conn.commit()
     conn.close()
     _migrate_defaults_to_per_user()
@@ -163,21 +177,63 @@ async def save_defaults(
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
+        derived = {}
         for variant, upload in (("genai", resume_genai), ("backend", resume_backend)):
             if not upload:
                 continue
-            content = extract_text_from_pdf(await upload.read())
+            raw = await upload.read()
+            content = extract_text_from_pdf(raw)
             cursor.execute(
                 "INSERT OR REPLACE INTO defaults (user_email, variant, filename, text_content)"
                 " VALUES (?, ?, ?, ?)",
                 (user_email, variant, upload.filename, content),
             )
 
+            # Capture this resume's own layout so tailoring can rewrite text
+            # inside it rather than generating a new document. Derived here, on
+            # the bytes we already have, so the template can never drift out of
+            # sync with the stored resume. A failure is non-fatal: tailoring
+            # falls back to the legacy structured-JSON path.
+            try:
+                layout = derive_layout(raw)
+                cursor.execute(
+                    "INSERT OR REPLACE INTO templates (user_email, variant, layout_json, derived_at)"
+                    " VALUES (?, ?, ?, ?)",
+                    (user_email, variant, json.dumps(layout), datetime.now().isoformat()),
+                )
+                derived[variant] = {
+                    "sections": len(layout["sections"]),
+                    "pages": layout["page_count"],
+                }
+            except Exception as layout_err:
+                print(f"[Layout] Could not derive template for {user_email}/{variant}: {layout_err}")
+                cursor.execute(
+                    "DELETE FROM templates WHERE user_email = ? AND variant = ?", (user_email, variant)
+                )
+
+        conn.commit()
+        conn.close()
+        return {"status": "success", "templates": derived}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.delete("/api/clear-default")
+async def clear_default(user_email: str, variant: str):
+    """Forget one saved resume. Called when the user deletes that slot in their
+    profile — without this the optimizer would keep tailoring CVs from a resume
+    the user has already removed."""
+    if variant not in ("genai", "backend"):
+        raise HTTPException(status_code=400, detail="variant must be 'genai' or 'backend'.")
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM defaults WHERE user_email = ? AND variant = ?", (user_email, variant))
+        cursor.execute("DELETE FROM templates WHERE user_email = ? AND variant = ?", (user_email, variant))
         conn.commit()
         conn.close()
         return {"status": "success"}
-    except HTTPException:
-        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -204,7 +260,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -595,6 +651,167 @@ async def resume_json(req: ResumeJsonRequest):
         print(f"Database error: {db_err}")
 
     return parsed
+
+
+# ── Layout-preserving tailoring (the path the outreach app uses) ─────────────
+
+TAILOR_SYSTEM_PROMPT = """You are an expert ATS resume editor.
+
+You are given a candidate's resume already broken into blocks, plus a target job
+description. You rewrite the WORDING of those blocks so the resume matches the
+job description. You are an editor, not an author: the document's structure is
+fixed and is not yours to change.
+
+Return JSON with exactly this shape — the same sections, in the same order, with
+the same block ids, and every list the same length as the one you were given:
+{
+  "sections": [
+    { "id": "s1", "blocks": [
+        { "id": "b1", "type": "paragraph", "text": "rewritten text" },
+        { "id": "b4", "type": "labeled", "text": "rewritten value only" },
+        { "id": "b2", "type": "bullets", "items": ["rewritten", "rewritten"] },
+        { "id": "b3", "type": "entry", "bullets": ["rewritten", "rewritten"] }
+    ]}
+  ],
+  "match_score": 0-100,
+  "added_keywords": ["..."],
+  "removed_keywords": ["..."],
+  "ats_tips": ["..."]
+}
+
+Hard rules:
+- NEVER add, remove, reorder or merge sections, blocks or bullets. If a block has
+  three bullets, return exactly three bullets for it.
+- NEVER invent employers, job titles, dates, degrees, certifications, metrics or
+  technologies the candidate has not shown evidence of. You may re-emphasise and
+  rephrase what is there, and surface skills implied by the listed projects.
+- Keep each rewritten string within about 15% of the original's character count.
+  Going long adds a page and breaks the candidate's layout.
+- Mirror the job description's vocabulary and seniority in the summary, skills
+  and bullets. Lead bullets with strong verbs; keep any metric already present.
+- `role_context` and `label_context` are given for orientation only. Never
+  return them. For a `labeled` block return only the value, never the label.
+- In a `labeled` skills row you may reorder and drop items so the most relevant
+  come first, but never add a skill the candidate has not demonstrated.
+- Leave a block out of your response entirely if it is already well-targeted and
+  you would not improve it.
+
+`added_keywords` are terms from the job description you worked in;
+`removed_keywords` are ones you de-emphasised; `ats_tips` are 2-5 specific,
+actionable gaps the candidate should address."""
+
+
+class ResumeTailorRequest(BaseModel):
+    job_description: str
+    user_email: str
+    variant: Optional[str] = None  # 'genai' | 'backend' — which template to use
+
+
+def _load_template(user_email: str, variant: Optional[str]) -> tuple[Optional[dict], str]:
+    """The stored layout map for one user's resume slot, and which slot it came from."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT variant, layout_json FROM templates WHERE user_email = ? AND variant IN ('genai', 'backend')",
+        (user_email,),
+    )
+    rows = {row[0]: row[1] for row in cursor.fetchall()}
+    conn.close()
+
+    order = [variant] if variant else []
+    order += [v for v in ("genai", "backend") if v != variant]
+    for key in order:
+        if rows.get(key):
+            try:
+                return json.loads(rows[key]), key
+            except json.JSONDecodeError:
+                continue
+    return None, "none"
+
+
+@app.get("/api/template")
+async def get_template(user_email: str, variant: Optional[str] = None):
+    """The stored layout map itself, so the UI can show the real document while
+    it is being tailored rather than an abstract spinner."""
+    layout, source = _load_template(user_email, variant)
+    if not layout:
+        raise HTTPException(status_code=404, detail="No resume template for this account.")
+    return {"layout": layout, "source": source}
+
+
+@app.get("/api/template-status")
+async def template_status(user_email: str):
+    """Which slots have a usable layout template. Lets the caller decide between
+    the layout-preserving path and the legacy one without attempting a tailor."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT variant FROM templates WHERE user_email = ?", (user_email,))
+    variants = [row[0] for row in cursor.fetchall()]
+    conn.close()
+    return {"variants": variants}
+
+
+@app.post("/api/resume-tailor")
+async def resume_tailor(req: ResumeTailorRequest):
+    """
+    Rewrite a resume's wording against a job description, inside its own layout.
+
+    Unlike /api/resume-json this never generates a document. It loads the layout
+    derived from the user's uploaded PDF, asks the LLM to rewrite only the text,
+    then merges the result back block by block — discarding anything that would
+    have altered the structure.
+    """
+    if not req.job_description or not req.job_description.strip():
+        raise HTTPException(status_code=400, detail="job_description is required.")
+
+    layout, source = _load_template(req.user_email, req.variant)
+    if not layout:
+        raise HTTPException(
+            status_code=404,
+            detail="No resume template found for this account. Upload a resume on your profile first.",
+        )
+
+    editable = editable_view(layout)
+    user_message = f"""--- Resume blocks to rewrite ---
+{json.dumps(editable, ensure_ascii=False)}
+
+--- Target job description ---
+{req.job_description[:6000]}
+"""
+
+    parsed = complete_json(TAILOR_SYSTEM_PROMPT, user_message)
+
+    # The merge is what enforces the format contract — anything the model
+    # returned that doesn't line up with the original layout is dropped.
+    merged, changes = apply_rewrite(layout, parsed)
+
+    result = {
+        "layout": merged,
+        "original_layout": layout,
+        "changes": changes,
+        "resume_text": layout_to_text(merged),
+        "match_score": parsed.get("match_score", 0),
+        "added_keywords": parsed.get("added_keywords", []) or [],
+        "removed_keywords": parsed.get("removed_keywords", []) or [],
+        "ats_tips": parsed.get("ats_tips", []) or [],
+        "source": source,
+    }
+
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO history (timestamp, user_email, job_description, match_score_genai, match_score_backend, data_json)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (datetime.now().isoformat(), req.user_email, req.job_description,
+             result["match_score"], 0, json.dumps({"changes": changes, "source": source})),
+        )
+        conn.commit()
+        conn.close()
+    except Exception as db_err:
+        print(f"Database error: {db_err}")
+
+    return result
 
 
 @app.get("/api/history")

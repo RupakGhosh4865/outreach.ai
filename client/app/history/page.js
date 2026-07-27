@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
-    Building2, Clock, Handshake, Mail, MailPlus, Plus, Search, Timer, X,
+    Building2, Clock, Handshake, Mail, MailPlus, Plus, Search, Timer, UserCheck, X,
 } from 'lucide-react';
 import AuthGuard from '../components/AuthGuard';
 import { Alert, Badge, Button, Card, EmptyState, Skeleton, Stat, cn } from '../components/ui';
@@ -36,6 +36,8 @@ export default function HistoryPage() {
     const [loading, setLoading] = useState(false);
     const [selected, setSelected] = useState(null);
     const [userEmail, setUserEmail] = useState('');
+    // '' = everyone. Filters the already-fetched list, so no extra request.
+    const [applierFilter, setApplierFilter] = useState('');
 
     const [error, setError] = useState('');
 
@@ -58,24 +60,67 @@ export default function HistoryPage() {
         setLoading(false);
     }
 
-    const stats = {
-        total: jobs.length,
-        sent: jobs.filter(j => j.status === 'sent').length,
-        totalEmails: jobs.reduce((sum, j) => sum + (j.sentTo?.length || 0), 0),
-        companies: [...new Set(jobs.map(j => j.companyName).filter(Boolean))].length,
-    };
+    const APPLIER_OWNER = 'You';
+    const applierOf = (job) => job.appliedBy || APPLIER_OWNER;
 
-    // Human-readable apply time (createdAt → sentAt)
-    function applyTime(job) {
+    // Everyone who has applied on this account, so the filter offers real names only.
+    const appliers = [...new Set(jobs.map(applierOf))].sort((a, b) =>
+        a === APPLIER_OWNER ? -1 : b === APPLIER_OWNER ? 1 : a.localeCompare(b));
+
+    const visibleJobs = applierFilter ? jobs.filter((j) => applierOf(j) === applierFilter) : jobs;
+
+    /**
+     * Milliseconds an application took.
+     *
+     * Prefers the duration recorded at send time. Records written before that
+     * field existed fall back to the createdAt→sentAt delta, which is the same
+     * number for those rows.
+     */
+    function applyMs(job) {
+        if (Number.isFinite(job.applyDurationMs) && job.applyDurationMs >= 0) return job.applyDurationMs;
         if (!job.sentAt || !job.createdAt) return null;
         const ms = new Date(job.sentAt) - new Date(job.createdAt);
-        if (ms < 0) return null;
+        return ms >= 0 ? ms : null;
+    }
+
+    /** Human-readable apply time, e.g. `2m 14s`. */
+    function applyTime(job) {
+        const ms = applyMs(job);
+        if (ms == null) return null;
         const secs = Math.floor(ms / 1000);
         if (secs < 60) return `${secs}s`;
         const mins = Math.floor(secs / 60);
-        const rem  = secs % 60;
+        const rem = secs % 60;
         return rem > 0 ? `${mins}m ${rem}s` : `${mins}m`;
     }
+
+    /** Median rather than mean — one abandoned tab shouldn't define "typical". */
+    function medianApplyTime(list) {
+        const times = list.map(applyMs).filter((ms) => ms != null).sort((a, b) => a - b);
+        if (!times.length) return null;
+        const mid = Math.floor(times.length / 2);
+        const ms = times.length % 2 ? times[mid] : Math.round((times[mid - 1] + times[mid]) / 2);
+        return applyTime({ applyDurationMs: ms });
+    }
+
+    const isToday = (d) => d && new Date(d).toDateString() === new Date().toDateString();
+
+    const stats = {
+        total: visibleJobs.length,
+        sent: visibleJobs.filter(j => j.status === 'sent').length,
+        totalEmails: visibleJobs.reduce((sum, j) => sum + (j.sentTo?.length || 0), 0),
+        companies: [...new Set(visibleJobs.map(j => j.companyName).filter(Boolean))].length,
+        medianTime: medianApplyTime(visibleJobs),
+    };
+
+    // Applications each person made today — the "how many times did Ansh apply
+    // for me today" question this page exists to answer.
+    const todayByApplier = appliers
+        .map((name) => ({
+            name,
+            count: jobs.filter((j) => applierOf(j) === name && isToday(j.createdAt)).length,
+        }))
+        .filter((a) => a.count > 0);
 
     return (
         <AuthGuard>
@@ -93,12 +138,53 @@ export default function HistoryPage() {
 
                 {/* ── Stats ────────────────────────────────────────────────── */}
                 {jobs.length > 0 && (
-                    <div className="mb-8 grid grid-cols-2 gap-4 lg:grid-cols-4">
+                    <div className="mb-6 grid grid-cols-2 gap-4 lg:grid-cols-5">
                         <Stat label="Campaigns" value={stats.total} icon={Mail} tone="brand" />
                         <Stat label="Sent" value={stats.sent} icon={Mail} tone="success" />
                         <Stat label="Emails delivered" value={stats.totalEmails} icon={MailPlus} tone="info" />
                         <Stat label="Companies" value={stats.companies} icon={Building2} tone="brand" />
+                        <Stat label="Typical time to apply" value={stats.medianTime || '—'} icon={Timer} tone="info" />
                     </div>
+                )}
+
+                {/* ── Who applied ──────────────────────────────────────────── */}
+                {appliers.length > 1 && (
+                    <Card className="mb-6">
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-[0.7rem] font-semibold uppercase tracking-wide text-subtle">
+                                    Applied by
+                                </span>
+                                {[{ value: '', label: 'Everyone' }, ...appliers.map((a) => ({ value: a, label: a }))].map((opt) => (
+                                    <button
+                                        key={opt.value || 'all'}
+                                        type="button"
+                                        onClick={() => setApplierFilter(opt.value)}
+                                        aria-pressed={applierFilter === opt.value}
+                                        className={cn(
+                                            'tap min-h-8 rounded-lg border px-3 text-sm font-semibold transition-colors duration-150',
+                                            applierFilter === opt.value
+                                                ? 'border-brand/50 bg-brand/12 text-brand'
+                                                : 'border-white/10 bg-white/2 text-muted hover:border-white/25',
+                                        )}
+                                    >
+                                        {opt.label}
+                                    </button>
+                                ))}
+                            </div>
+
+                            {todayByApplier.length > 0 && (
+                                <p className="flex flex-wrap items-center gap-x-3 text-sm text-subtle">
+                                    <span className="font-semibold">Today:</span>
+                                    {todayByApplier.map((a) => (
+                                        <span key={a.name}>
+                                            {a.name} <span className="font-bold text-text" data-numeric>{a.count}</span>
+                                        </span>
+                                    ))}
+                                </p>
+                            )}
+                        </div>
+                    </Card>
                 )}
 
                 {/* ── List ─────────────────────────────────────────────────── */}
@@ -127,7 +213,7 @@ export default function HistoryPage() {
                     </Card>
                 ) : (
                     <ul className="space-y-3">
-                        {jobs.map((job) => {
+                        {visibleJobs.map((job) => {
                             const type = EMAIL_TYPE_LABELS[job.emailType] || { label: job.emailType, icon: Mail };
                             const TypeIcon = type.icon;
                             const took = applyTime(job);
@@ -155,6 +241,12 @@ export default function HistoryPage() {
                                                         <span className="inline-flex items-center gap-1">
                                                             <Timer className="size-3.5" aria-hidden="true" />
                                                             {took}
+                                                        </span>
+                                                    )}
+                                                    {job.appliedBy && (
+                                                        <span className="inline-flex items-center gap-1">
+                                                            <UserCheck className="size-3.5" aria-hidden="true" />
+                                                            {job.appliedBy}
                                                         </span>
                                                     )}
                                                 </p>
@@ -237,6 +329,16 @@ export default function HistoryPage() {
                                 </ul>
 
                                 <dl className="grid grid-cols-2 gap-4 border-t border-white/8 pt-4 text-sm">
+                                    <div>
+                                        <dt className="text-xs uppercase tracking-wide text-subtle">Applied by</dt>
+                                        <dd className="mt-0.5 font-semibold">{selected.appliedBy || 'You'}</dd>
+                                    </div>
+                                    {applyTime(selected) && (
+                                        <div>
+                                            <dt className="text-xs uppercase tracking-wide text-subtle">Time to apply</dt>
+                                            <dd className="mt-0.5 font-semibold" data-numeric>{applyTime(selected)}</dd>
+                                        </div>
+                                    )}
                                     {selected.optimizedResumeUsed && (
                                         <div>
                                             <dt className="text-xs uppercase tracking-wide text-subtle">CV used</dt>

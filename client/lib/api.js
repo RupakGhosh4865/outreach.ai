@@ -20,9 +20,15 @@ export function clearSession() {
 
 /** Thrown for any non-2xx response, carrying the server's message and status. */
 export class ApiError extends Error {
-    constructor(status, message) {
+    /**
+     * `data` is the parsed error body. Some failures are structured rather than
+     * fatal — an already-applied 409 carries the date and who applied — and the
+     * UI needs those fields, not just the message.
+     */
+    constructor(status, message, data = {}) {
         super(message);
         this.status = status;
+        this.data = data;
     }
 }
 
@@ -58,7 +64,7 @@ export async function apiFetch(path, { method = 'GET', body, headers = {}, ...re
     const text = await res.text();
     const data = text ? (() => { try { return JSON.parse(text); } catch { return { message: text }; } })() : {};
 
-    if (!res.ok) throw new ApiError(res.status, data.message || `Request failed (${res.status})`);
+    if (!res.ok) throw new ApiError(res.status, data.message || `Request failed (${res.status})`, data);
     return data;
 }
 

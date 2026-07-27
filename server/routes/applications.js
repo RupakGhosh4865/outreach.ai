@@ -2,7 +2,7 @@ import express from 'express';
 import fs from 'fs';
 
 import JobApplication from '../models/JobApplication.js';
-import { transition, IllegalTransitionError } from '../services/applicationFsm.js';
+import { transition, canTransition, IllegalTransitionError } from '../services/applicationFsm.js';
 import { runPipeline, retryFrom, sendDraft, isRunning } from '../services/pipeline.js';
 import { requireAuth, currentEmail, loadOwnedApplication } from '../middleware/auth.js';
 
@@ -79,6 +79,83 @@ router.post('/:id/retry', handle(async (req, res) => {
 
     retryFrom(app, step);
     res.json({ message: `Retrying "${step}".`, application: await withRunning(app) });
+}));
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+
+// POST /api/applications/:id/contacts — add a recipient by hand
+//
+// Contact discovery fails often (small companies, no public addresses), and the
+// pipeline's own error text told the user to "add a recipient manually to
+// continue" while offering no way to do it. Without this the application is
+// stuck: retrying discovery just fails the same way.
+router.post('/:id/contacts', handle(async (req, res) => {
+    const app = await loadApp(req);
+
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    if (!EMAIL_RE.test(email)) {
+        return res.status(400).json({ message: 'Enter a valid email address.' });
+    }
+    if ((app.contacts || []).some((c) => (c.email || '').toLowerCase() === email)) {
+        return res.status(409).json({ message: `${email} is already a recipient on this application.` });
+    }
+    if (app.status === 'emailed') {
+        return res.status(409).json({ message: 'This application has already been sent.' });
+    }
+
+    app.contacts.push({
+        firstName: String(req.body?.firstName || '').trim(),
+        lastName: String(req.body?.lastName || '').trim(),
+        email,
+        position: String(req.body?.position || '').trim() || 'Hiring Manager',
+        source: 'manual',
+    });
+
+    // Only a *failed* discovery step is unstuck by this. A pending one means the
+    // pipeline is still working its way there — resuming from the email step
+    // would race the CV build that is still running.
+    const findStep = app.steps.find((s) => s.name === 'find_contacts');
+    const wasStuck = findStep?.status === 'error';
+
+    if (wasStuck) {
+        findStep.status = 'done';
+        findStep.error = undefined;
+        findStep.finishedAt = new Date();
+    }
+    await app.save();
+
+    if (wasStuck) {
+        if (canTransition(app.status, 'contacts_found')) await transition(app, 'contacts_found');
+        // Background; the UI polls GET /:id. Errors land on the step itself, but
+        // catch here too so a rejection can't take the process down.
+        retryFrom(app, 'generate_email')
+            .catch((err) => console.error('[Applications] Resume after manual contact failed:', err.message));
+    }
+
+    res.json({
+        message: wasStuck
+            ? `Added ${email} — writing the outreach email now.`
+            : `Added ${email} as a recipient.`,
+        application: await withRunning(app),
+    });
+}));
+
+// DELETE /api/applications/:id/contacts/:email — drop a recipient
+router.delete('/:id/contacts/:email', handle(async (req, res) => {
+    const app = await loadApp(req);
+    if (app.status === 'emailed') {
+        return res.status(409).json({ message: 'This application has already been sent.' });
+    }
+
+    const email = decodeURIComponent(req.params.email).toLowerCase();
+    const before = app.contacts.length;
+    app.contacts = app.contacts.filter((c) => (c.email || '').toLowerCase() !== email);
+    if (app.contacts.length === before) {
+        return res.status(404).json({ message: 'That recipient is not on this application.' });
+    }
+
+    await app.save();
+    res.json({ message: `Removed ${email}.`, application: await withRunning(app) });
 }));
 
 // POST /api/applications/:id/send — Review & Send from the drafted email

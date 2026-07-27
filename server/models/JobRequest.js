@@ -35,6 +35,14 @@ const jobRequestSchema = new mongoose.Schema({
     },
     createdAt: { type: Date, default: Date.now },
     sentAt: { type: Date, default: null },
+    // Who actually pressed send. Null means the account owner did it themselves;
+    // a name means someone applied on their behalf.
+    appliedBy: { type: String, default: null },
+    // How long this application took, start to send. `createdAt` is when the
+    // record was written, which for an immediate send is *after* the work — so
+    // the wizard reports its own start time rather than it being inferred.
+    applyStartedAt: { type: Date, default: null },
+    applyDurationMs: { type: Number, default: null },
     // Apply Timing / Scheduling
     scheduledAt: { type: Date, default: null },         // null = send immediately
     isScheduled: { type: Boolean, default: false },     // true if user picked a future send time

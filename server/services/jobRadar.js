@@ -7,7 +7,8 @@ import UserProfile from '../models/UserProfile.js';
 import { parseResume, profileSummary } from './resume.js';
 import { acquireLock, releaseLock, isLocked } from './lock.js';
 
-import { safeSearch } from './jobSources/shared.js';
+import { safeSearch, norm, jobKey } from './jobSources/shared.js';
+import { appliedKeyMap } from './appliedJobs.js';
 import { searchAdzuna, searchJSearch } from './jobSources/boards.js';
 import { searchLinkedIn } from './jobSources/linkedin.js';
 import { searchIndeed } from './jobSources/indeed.js';
@@ -20,8 +21,6 @@ import { searchCouncils } from './jobSources/councils.js';
 export const ALL_SOURCES =['adzuna', 'jsearch', 'linkedin', 'indeed', 'glassdoor', 'wellfound', 'google', 'github', 'council'];
 const MAX_SCORED_PER_SCAN = 60;
 const SCORE_BATCH = 5;
-
-const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
 // One scan per user at a time, enforced across replicas by the Mongo lock.
 const localScans = new Map(); // userEmail -> Promise
@@ -163,18 +162,35 @@ async function persistAndScore({ scanId, userEmail, jobs, roles, resumeText, sum
             .map((d) => d.applyUrl).filter(Boolean)
     );
 
+    // Jobs this user has already applied to. They're still stored so the
+    // "show applied" toggle can surface them, but they're marked on sight and
+    // never re-scored — the point is that the same posting is never offered twice.
+    const applied = await appliedKeyMap(userEmail);
+
     const docs = [];
+    let appliedCount = 0;
     for (const job of merged.values()) {
         if (job.applyUrl && dismissed.has(job.applyUrl)) continue;
+        const appliedAt = applied.get(jobKey(job.title, job.company, job.applyUrl));
         const query = job.applyUrl
             ? { userEmail, applyUrl: job.applyUrl }
             : { userEmail, title: job.title, company: job.company };
         const doc = await DiscoveredJob.findOneAndUpdate(
             query,
-            { $set: { ...job, userEmail }, $setOnInsert: { status: 'new', discoveredAt: new Date() } },
+            {
+                // `status` is forced here rather than only on insert: a job
+                // discovered before it was applied to must flip to 'applied' too.
+                $set: { ...job, userEmail, ...(appliedAt ? { status: 'applied', appliedAt } : {}) },
+                $setOnInsert: { status: 'new', discoveredAt: new Date() },
+            },
             { upsert: true, new: true }
         ).catch((e) => { console.warn('[Radar] upsert failed:', e.message); return null; });
-        if (doc) docs.push(doc);
+        if (!doc) continue;
+        if (appliedAt) appliedCount += 1; else docs.push(doc);
+    }
+
+    if (appliedCount) {
+        console.log(`[Radar] filtered ${appliedCount} already-applied job(s) for ${userEmail}`);
     }
 
     // Jobs are now queryable, so the UI can show them while scoring continues.

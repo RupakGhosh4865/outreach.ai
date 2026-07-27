@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import crypto from 'crypto';
 
 export const BROWSER_UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
@@ -12,7 +13,10 @@ export function normalizeJob(job) {
         company: (job.company || '').trim(),
         location: (job.location || 'UK').trim(),
         description: job.description || '',
-        applyUrl: job.applyUrl || '',
+        // undefined, not '' — DiscoveredJob's unique index on (userEmail, applyUrl)
+        // is sparse, and an empty string is a real value that two URL-less jobs
+        // would collide on.
+        applyUrl: job.applyUrl || undefined,
         salaryMin: job.salaryMin || null,
         salaryMax: job.salaryMax || null,
         postedAt: job.postedAt || null,
@@ -21,6 +25,44 @@ export function normalizeJob(job) {
         sourceDetail: job.sourceDetail || '',
         visaSponsor: Boolean(job.visaSponsor),
     };
+}
+
+/** Lowercase, punctuation-free form used for comparing titles and companies. */
+export const norm = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+
+// Params that identify the click, not the job — two links differing only by
+// these point at the same posting.
+const TRACKING_PARAMS = /^(utm_|ref$|referer|referrer|source$|src$|gclid|fbclid|mc_[ce]id|trk|trackingId|refId|jobRefId|position$|pageNum$|originalSubdomain)/i;
+
+/**
+ * Canonical identity for a job posting, stable across sources and scans.
+ *
+ * Prefers the apply URL stripped of tracking noise; falls back to a hash of
+ * title + company so postings scraped without a link still dedupe. This is the
+ * key the applied-jobs ledger is stored under, so it must stay stable — changing
+ * the algorithm orphans existing records.
+ */
+export function jobKey(title, company, applyUrl) {
+    const raw = String(applyUrl || '').trim();
+    if (raw) {
+        try {
+            const url = new URL(raw);
+            for (const param of [...url.searchParams.keys()]) {
+                if (TRACKING_PARAMS.test(param)) url.searchParams.delete(param);
+            }
+            url.hash = '';
+            url.protocol = 'https:';
+            url.hostname = url.hostname.toLowerCase().replace(/^www\./, '');
+            url.pathname = url.pathname.replace(/\/+$/, '') || '/';
+            return `url:${url.toString().toLowerCase()}`;
+        } catch {
+            // Not a parseable URL — fall through to the title/company hash.
+        }
+    }
+
+    const basis = `${norm(title)}|${norm(company)}`;
+    if (!basis.replace('|', '').trim()) return null;
+    return `tc:${crypto.createHash('sha1').update(basis).digest('hex').slice(0, 20)}`;
 }
 
 /**
