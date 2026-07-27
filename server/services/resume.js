@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { renderResumePdf, resumeToText } from './pdfRenderer.js';
+import { renderResumePdf, resumeToText, renderLayoutPdf, layoutToText } from './pdfRenderer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -119,8 +119,80 @@ export const getCacheEntry = (key) => optimCache.get(key);
  * Never throws — always resolves to { ok: true, ...result } or { ok: false, error }
  * so callers can record the real reason instead of silently falling back.
  */
-export async function buildOptimizedResume({ jobDescription, profile, outPath }) {
+/**
+ * The stages an optimisation moves through, with the percentage each completes
+ * at. Reported to the UI so the progress card shows what's happening rather
+ * than an indeterminate spinner.
+ */
+export const OPTIM_STAGES = [
+    { key: 'reading', label: 'Reading your CV', percent: 12 },
+    { key: 'analysing', label: 'Analysing role requirements', percent: 30 },
+    { key: 'rewriting', label: 'Rewriting to match the role', percent: 72 },
+    { key: 'rendering', label: 'Rendering PDF layout', percent: 92 },
+    { key: 'done', label: 'Ready', percent: 100 },
+];
+
+const stageInfo = (key) => OPTIM_STAGES.find((s) => s.key === key) || OPTIM_STAGES[0];
+
+/**
+ * Tailor the user's resume inside its own layout.
+ *
+ * Returns null when the account has no derived template, so the caller can fall
+ * back to the legacy generate-from-scratch path.
+ */
+async function buildLayoutResume({ jobDescription, profile, outPath, onStage }) {
+    onStage?.('analysing');
+    const { data } = await axios.post(
+        `${RESUME_OPTIMIZER_URL}/api/resume-tailor`,
+        { job_description: jobDescription, user_email: profile?.email },
+        { timeout: 180000 }
+    );
+
+    if (!data?.layout) throw new Error('Optimizer returned no layout.');
+
+    onStage?.('rendering');
+    const pdfPath = outPath || path.join(TMP_RESUME_DIR, `optimized_${Date.now()}.pdf`);
+    await renderLayoutPdf(data.layout, pdfPath);
+
+    const matchScore = Number(data.match_score) || 0;
+    console.log(`[Resume] Tailored CV in its own layout (score ${matchScore}, ${data.changes?.length || 0} edits) → ${path.basename(pdfPath)}`);
+
+    return {
+        ok: true,
+        pdfPath,
+        layout: data.layout,
+        originalLayout: data.original_layout,
+        changes: data.changes || [],
+        resumeText: data.resume_text || layoutToText(data.layout),
+        matchScore,
+        source: data.source,
+        addedKeywords: data.added_keywords || [],
+        removedKeywords: data.removed_keywords || [],
+        atsTips: data.ats_tips || [],
+        projectSuggestions: [],
+    };
+}
+
+export async function buildOptimizedResume({ jobDescription, profile, outPath, onStage }) {
     try {
+        onStage?.('reading');
+        // Preferred path: rewrite the words inside the user's own layout. Only
+        // accounts whose resume predates template derivation fall through to the
+        // generic builder below, which rebuilds the document from scratch.
+        try {
+            return await buildLayoutResume({ jobDescription, profile, outPath, onStage });
+        } catch (layoutErr) {
+            if (layoutErr?.response?.status !== 404) throw layoutErr;
+            console.warn('[Resume] No layout template for this account — using the generic builder.');
+        }
+    } catch (err) {
+        const error = describeAxiosError(err);
+        console.error('[Resume] Layout-preserving optimization failed:', error);
+        return { ok: false, error };
+    }
+
+    try {
+        onStage?.('analysing');
         let resumeText = '';
         if (profile?.resumePath && fs.existsSync(profile.resumePath)) {
             resumeText = await parseResume(profile.resumePath);
@@ -155,6 +227,7 @@ export async function buildOptimizedResume({ jobDescription, profile, outPath })
         ].filter(Boolean);
         if (knownLinks.length) resume.links = knownLinks;
 
+        onStage?.('rendering');
         const pdfPath = outPath || path.join(TMP_RESUME_DIR, `optimized_${Date.now()}.pdf`);
         await renderResumePdf(resume, pdfPath);
 
@@ -202,11 +275,23 @@ export function getOptimizedResumeForJob(jobDescription, profile) {
         error: null,
         createdAt: Date.now(),
         userEmail: profile?.email || null,
+        // Surfaced by the status route so the UI can show what's happening
+        // instead of an indeterminate spinner.
+        stage: 'reading',
+        stageLabel: stageInfo('reading').label,
+        percent: stageInfo('reading').percent,
     };
-    entry.promise = buildOptimizedResume({ jobDescription, profile }).then((result) => {
+    const onStage = (key) => {
+        const stage = stageInfo(key);
+        entry.stage = stage.key;
+        entry.stageLabel = stage.label;
+        entry.percent = stage.percent;
+    };
+    entry.promise = buildOptimizedResume({ jobDescription, profile, onStage }).then((result) => {
         entry.status = result.ok ? 'done' : 'failed';
         entry.result = result.ok ? result : null;
         entry.error = result.ok ? null : result.error;
+        onStage(result.ok ? 'done' : 'reading');
         return result;
     });
     optimCache.set(key, entry);

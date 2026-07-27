@@ -50,6 +50,9 @@ export async function upsertApplication(userEmail, job, source) {
         applyMethod: job.applyMethod || 'unknown',
         validation: job.validation,
         status: 'ready',
+        // Starts the clock the moment a job enters the pipeline, so History can
+        // report how long the whole apply took.
+        applyStartedAt: new Date(),
     };
 
     if (applyUrl) {
@@ -57,7 +60,9 @@ export async function upsertApplication(userEmail, job, source) {
         if (existing) {
             // Don't clobber an application the user has already acted on.
             if (['found', 'validating', 'ready'].includes(existing.status)) {
-                Object.assign(existing, fields);
+                // Keep the original start time — re-ingesting the same job is
+                // part of the same attempt, so the clock shouldn't restart.
+                Object.assign(existing, { ...fields, applyStartedAt: existing.applyStartedAt || fields.applyStartedAt });
                 await existing.save();
             }
             return existing;

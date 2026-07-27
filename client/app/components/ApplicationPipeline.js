@@ -2,11 +2,11 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-    AlertCircle, Check, CheckCircle2, CircleDashed, FileText, Loader2, Minus,
-    RotateCcw, Send, Workflow, X,
+    Check, CheckCircle2, CircleDashed, FileText, Loader2, Mail, Minus, Plus,
+    RotateCcw, Send, Sparkles, Trash2, Users, Workflow, X,
 } from 'lucide-react';
 import { Alert, Badge, Button, Card, CardTitle, Field, Input, Textarea, cn } from './ui';
-import { apiGet, apiPost, downloadAuthedFile, openAuthedFile } from '@/lib/api';
+import { apiDelete, apiGet, apiPost, downloadAuthedFile, openAuthedFile } from '@/lib/api';
 
 const STEP_LABELS = {
     generate_cv: 'Build job-matched CV',
@@ -15,22 +15,13 @@ const STEP_LABELS = {
     send_email: 'Send email',
 };
 
-/* Status is carried by an icon as well as colour, so it survives a colour-vision
-   difference and a greyscale screenshot. */
-const STEP_ICON = {
-    pending: CircleDashed,
-    running: Loader2,
-    done: Check,
-    error: X,
-    skipped: Minus,
-};
-
-const STEP_TONE = {
-    pending: 'text-subtle',
-    running: 'text-info',
-    done: 'text-success',
-    error: 'text-danger',
-    skipped: 'text-subtle',
+/* Mirrors the autopilot stepper on the same page: an icon and a one-line
+   description per stage, so both routes into an application read the same. */
+const STEP_META = {
+    generate_cv: { icon: FileText, desc: 'Rewriting your CV to match this job description.' },
+    find_contacts: { icon: Users, desc: 'Looking for hiring managers and decision makers.' },
+    generate_email: { icon: Sparkles, desc: 'Drafting personalised outreach copy.' },
+    send_email: { icon: Send, desc: 'Waiting for your review before anything goes out.' },
 };
 
 const STATUS_LABEL = {
@@ -57,6 +48,91 @@ const STATUS_TONE = {
 };
 
 const ACTIVE_STATUSES = ['approved', 'cv_generating', 'cv_generated', 'contacts_found', 'emailing'];
+
+/**
+ * Recipient list with an inline add field.
+ *
+ * Automated contact discovery fails routinely — small companies, no published
+ * addresses — and when it did the application simply stopped, with an error that
+ * asked for a manual recipient but no way to enter one. This is that way.
+ */
+function RecipientEditor({ app, busy, onAdd, onRemove }) {
+    const [email, setEmail] = useState('');
+    const [adding, setAdding] = useState(false);
+    const contacts = app.contacts || [];
+    const inputId = `recipient-${app._id}`;
+
+    const submit = async () => {
+        const value = email.trim();
+        if (!value) return;
+        setAdding(true);
+        const ok = await onAdd(value);
+        if (ok) setEmail('');
+        setAdding(false);
+    };
+
+    return (
+        <div className="mb-3 rounded-xl border border-white/8 bg-white/2 p-3">
+            <p className="mb-2 flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-subtle">
+                <Mail className="size-3.5" aria-hidden="true" />
+                Recipients
+            </p>
+
+            {contacts.length > 0 ? (
+                <ul className="mb-3 flex flex-wrap gap-1.5">
+                    {contacts.map((c) => (
+                        <li
+                            key={c.email}
+                            className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/4 py-1 pl-2.5 pr-1 text-xs"
+                        >
+                            <span className="max-w-52 truncate">{c.email}</span>
+                            {c.source === 'manual' && <span className="text-[0.65rem] text-subtle">added by you</span>}
+                            <button
+                                type="button"
+                                onClick={() => onRemove(c.email)}
+                                disabled={busy}
+                                aria-label={`Remove ${c.email}`}
+                                className="tap grid size-5 place-items-center rounded-full text-subtle transition-colors hover:bg-danger/15 hover:text-danger disabled:opacity-50"
+                            >
+                                <Trash2 className="size-3" aria-hidden="true" />
+                            </button>
+                        </li>
+                    ))}
+                </ul>
+            ) : (
+                <p className="mb-3 text-xs text-subtle">
+                    No contacts found automatically. Add an address to carry on — the CV is already built.
+                </p>
+            )}
+
+            <div className="flex flex-col gap-2 sm:flex-row">
+                <label className="sr-only" htmlFor={inputId}>Recipient email address</label>
+                <Input
+                    id={inputId}
+                    type="email"
+                    inputMode="email"
+                    autoComplete="off"
+                    placeholder="hiring@company.com"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); submit(); } }}
+                />
+                <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    loading={adding}
+                    disabled={adding || busy || !email.trim()}
+                    onClick={submit}
+                    className="sm:w-36"
+                >
+                    {!adding && <Plus className="size-3.5" aria-hidden="true" />}
+                    Add recipient
+                </Button>
+            </div>
+        </div>
+    );
+}
 
 /** Live view of every application in flight, with per-step progress and retries. */
 export default function ApplicationPipeline({ userEmail, isExtension, refreshKey }) {
@@ -96,6 +172,19 @@ export default function ApplicationPipeline({ userEmail, isExtension, refreshKey
             const data = await apiPost(`/api/applications/${app._id}${path}`, body || {});
             await load();
             return data;
+        } catch (e) {
+            setError(e.message);
+        } finally {
+            setBusyId('');
+        }
+    }
+
+    async function remove(app, email) {
+        setBusyId(app._id);
+        setError('');
+        try {
+            await apiDelete(`/api/applications/${app._id}/contacts/${encodeURIComponent(email)}`);
+            await load();
         } catch (e) {
             setError(e.message);
         } finally {
@@ -148,6 +237,16 @@ export default function ApplicationPipeline({ userEmail, isExtension, refreshKey
                         const failed = app.steps?.find((s) => s.status === 'error');
                         const draft = editing[app._id] || { subject: app.email?.subject || '', body: app.email?.body || '' };
                         const canSend = ['email_drafted', 'email_failed'].includes(app.status);
+                        const steps = app.steps || [];
+                        const total = steps.length;
+                        const done = steps.filter((s) => s.status === 'done' || s.status === 'skipped').length;
+                        // Offer the recipient editor whenever contact discovery
+                        // stalled, and while a draft is open so more people can be
+                        // added before it goes out. Never once it has been sent —
+                        // the server refuses those edits anyway.
+                        const settled = ['emailed', 'denied'].includes(app.status);
+                        const needsRecipient =
+                            !settled && (failed?.name === 'find_contacts' || !app.contacts?.length || canSend);
 
                         return (
                             <li key={app._id} className="rounded-xl border border-white/8 bg-white/2 p-4">
@@ -165,33 +264,88 @@ export default function ApplicationPipeline({ userEmail, isExtension, refreshKey
                                     </Badge>
                                 </div>
 
-                                {/* Step rail */}
-                                <ol className="mb-3 space-y-1.5">
-                                    {(app.steps || []).map((step) => {
-                                        const Icon = STEP_ICON[step.status] || CircleDashed;
-                                        return (
-                                            <li key={step.name} className="flex items-start gap-2.5 text-sm">
-                                                <Icon
+                                {/* Step rail, styled to match the autopilot stepper. */}
+                                <div className="mb-3 rounded-2xl border border-white/8 bg-white/2 p-3 sm:p-4" aria-live="polite">
+                                    <div className="mb-3 flex items-center justify-between gap-3">
+                                        <p className="text-sm font-bold">
+                                            {failed ? 'Needs your input' : done === total ? 'Ready for review' : 'Working on it…'}
+                                        </p>
+                                        <span className="text-xs font-semibold text-subtle" data-numeric>
+                                            Step {Math.min(done + (failed ? 0 : 1), total)} of {total}
+                                        </span>
+                                    </div>
+
+                                    <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-white/8">
+                                        <div
+                                            className={cn(
+                                                'h-full rounded-full transition-[width] duration-500 ease-out',
+                                                failed ? 'bg-danger' : 'bg-brand',
+                                            )}
+                                            style={{ width: `${total ? (done / total) * 100 : 0}%` }}
+                                        />
+                                    </div>
+
+                                    <ol className="space-y-1.5">
+                                        {(app.steps || []).map((step) => {
+                                            const meta = STEP_META[step.name] || {};
+                                            const StageIcon = meta.icon || CircleDashed;
+                                            const active = step.status === 'running' || step.status === 'error';
+                                            const isDone = step.status === 'done';
+                                            const waiting = step.name === 'send_email' && !app.autoSend && step.status === 'pending';
+
+                                            return (
+                                                <li
+                                                    key={step.name}
                                                     className={cn(
-                                                        'mt-0.5 size-4 shrink-0',
-                                                        STEP_TONE[step.status],
-                                                        step.status === 'running' && 'animate-spin',
+                                                        'flex items-start gap-3 rounded-lg px-2 py-1.5 transition-colors duration-300',
+                                                        step.status === 'running' && 'bg-brand/8',
+                                                        step.status === 'error' && 'bg-danger/8',
+                                                        step.status === 'pending' && !waiting && 'opacity-45',
                                                     )}
-                                                    aria-hidden="true"
-                                                />
-                                                <span className={step.status === 'pending' ? 'text-subtle' : 'text-muted'}>
-                                                    {STEP_LABELS[step.name] || step.name}
-                                                    {step.name === 'send_email' && !app.autoSend && step.status === 'pending' && (
-                                                        <span className="text-subtle"> (waits for your review)</span>
-                                                    )}
-                                                    {step.error && (
-                                                        <span className="mt-0.5 block text-xs text-danger">{step.error}</span>
-                                                    )}
-                                                </span>
-                                            </li>
-                                        );
-                                    })}
-                                </ol>
+                                                >
+                                                    <span
+                                                        className={cn(
+                                                            'mt-0.5 grid size-5 shrink-0 place-items-center rounded-full',
+                                                            isDone && 'bg-brand text-brand-ink',
+                                                            step.status === 'error' && 'text-danger',
+                                                            step.status === 'running' && 'text-brand',
+                                                            step.status === 'pending' && 'text-subtle',
+                                                        )}
+                                                    >
+                                                        {isDone && <Check className="size-3" aria-hidden="true" />}
+                                                        {step.status === 'error' && <X className="size-4" aria-hidden="true" />}
+                                                        {step.status === 'running' && <Loader2 className="size-4 animate-spin" aria-hidden="true" />}
+                                                        {step.status === 'skipped' && <Minus className="size-4" aria-hidden="true" />}
+                                                        {step.status === 'pending' && <StageIcon className="size-4" aria-hidden="true" />}
+                                                    </span>
+                                                    <span className="min-w-0">
+                                                        <span className={cn('block text-sm font-semibold', active ? 'text-text' : 'text-muted')}>
+                                                            {STEP_LABELS[step.name] || step.name}
+                                                            {waiting && <span className="font-normal text-subtle"> (waits for your review)</span>}
+                                                        </span>
+                                                        {step.error
+                                                            ? <span className="block text-xs text-danger">{step.error}</span>
+                                                            : step.status === 'running' && meta.desc
+                                                                ? <span className="block text-xs text-subtle">{meta.desc}</span>
+                                                                : null}
+                                                    </span>
+                                                </li>
+                                            );
+                                        })}
+                                    </ol>
+                                </div>
+
+                                {/* Recipients. Contact discovery fails often, and this is the
+                                    only way past it — the pipeline's own error asks for a
+                                    recipient, so the field to supply one belongs right here. */}
+                                {needsRecipient && (
+                                    <RecipientEditor
+                                        app={app}
+                                        busy={busy}
+                                        onAdd={(email) => act(app, '/contacts', { email })}
+                                        onRemove={(email) => remove(app, email)}
+                                    />
+                                )}
 
                                 {/* Draft review */}
                                 {canSend && (
@@ -211,9 +365,6 @@ export default function ApplicationPipeline({ userEmail, isExtension, refreshKey
                                                 className="min-h-40 font-mono text-[0.85rem]"
                                             />
                                         </Field>
-                                        <p className="text-xs text-subtle">
-                                            To: {(app.contacts || []).map((c) => c.email).join(', ') || 'no recipients found'}
-                                        </p>
                                     </div>
                                 )}
 

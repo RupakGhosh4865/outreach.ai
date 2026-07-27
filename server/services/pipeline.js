@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 
 import JobApplication from '../models/JobApplication.js';
 import JobRequest from '../models/JobRequest.js';
+import DiscoveredJob from '../models/DiscoveredJob.js';
 import { transition, startStep, finishStep, resetStepsFrom } from './applicationFsm.js';
 import { buildOptimizedResume, parseResume } from './resume.js';
 import { findContactsForCompany } from './contacts.js';
@@ -16,6 +17,7 @@ import {
     loadProfileForSending,
 } from './mailer.js';
 import { acquireLock, releaseLock, isLocked } from './lock.js';
+import { recordApplied } from './appliedJobs.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -88,15 +90,26 @@ async function stepFindContacts(app, profile) {
             limit,
         });
 
-        if (!contacts.length) {
+        // Recipients the user added by hand outrank discovery and must survive
+        // it: overwriting them would silently delete the address that unstuck
+        // this application in the first place.
+        const manual = (app.contacts || [])
+            .filter((c) => c.source === 'manual')
+            // Plain objects, not hydrated subdocuments — this array replaces the
+            // whole DocumentArray below.
+            .map((c) => ({ firstName: c.firstName, lastName: c.lastName, email: c.email, position: c.position, linkedinUrl: c.linkedinUrl, source: 'manual' }));
+        const seen = new Set(manual.map((c) => (c.email || '').toLowerCase()));
+        const merged = [...manual, ...contacts.filter((c) => !seen.has((c.email || '').toLowerCase()))];
+
+        if (!merged.length) {
             const message = `No contact emails found for ${app.companyName || 'this company'}. Add a recipient manually to continue.`;
             await finishStep(app, 'find_contacts', { error: message });
             throw new StepError('find_contacts', message);
         }
 
-        await finishStep(app, 'find_contacts', { patch: { contacts, companyDomain: domain } });
+        await finishStep(app, 'find_contacts', { patch: { contacts: merged, companyDomain: domain } });
         await transition(app, 'contacts_found');
-        return contacts;
+        return merged;
     } catch (err) {
         if (err instanceof StepError) throw err;
         await finishStep(app, 'find_contacts', { error: err.message });
@@ -197,8 +210,12 @@ async function stepSendEmail(app, profile) {
         });
         await transition(app, 'emailed');
 
+        const applyDurationMs = app.applyStartedAt
+            ? Date.now() - new Date(app.applyStartedAt).getTime()
+            : null;
+
         // Mirror into JobRequest so the existing history/follow-up features see it.
-        await JobRequest.create({
+        const jobRecord = await JobRequest.create({
             userEmail: app.userEmail,
             linkedinUrl: app.applyUrl || '',
             companyName: app.companyName || '',
@@ -214,7 +231,31 @@ async function stepSendEmail(app, profile) {
             optimizedMatchScore: app.cv?.matchScore,
             optimizedAtsTips: app.cv?.atsTips || [],
             optimizedAddedKeywords: app.cv?.addedKeywords || [],
+            appliedBy: app.appliedBy || null,
+            applyStartedAt: app.applyStartedAt || null,
+            applyDurationMs,
         });
+
+        app.applyDurationMs = applyDurationMs;
+        await app.save();
+
+        // Keep the radar from offering this posting again on the next scan.
+        await recordApplied({
+            userEmail: app.userEmail,
+            title: app.jobTitle,
+            company: app.companyName,
+            applyUrl: app.applyUrl,
+            appliedBy: app.appliedBy || null,
+            jobRequestId: jobRecord._id,
+            applicationId: app._id,
+        });
+
+        // Mark the radar card too, so it reads "Applied" straight away rather
+        // than staying "In pipeline" until the next scan reconciles it.
+        await DiscoveredJob.updateOne(
+            { userEmail: app.userEmail, applicationId: app._id },
+            { $set: { status: 'applied', appliedAt: new Date() } },
+        ).catch((err) => console.warn('[Pipeline] Could not mark discovered job applied:', err.message));
 
         if (profile) {
             if (!profile.subscription) profile.subscription = { plan: 'free', campaignsUsed: 0, lastResetDate: new Date() };

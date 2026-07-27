@@ -7,6 +7,7 @@ import FormData from 'form-data';
 import { fileURLToPath } from 'url';
 import UserProfile from '../models/UserProfile.js';
 import { requireAuth, currentEmail } from '../middleware/auth.js';
+import { ensurePdf } from '../services/documentConvert.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -47,9 +48,17 @@ const MIME_BY_EXT = {
     '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
 };
 
-/** Real content type for a file we're forwarding, rather than assuming PDF. */
+/**
+ * Content type of a file we're forwarding, taken from the path actually stored
+ * on disk. Word uploads are converted to PDF before this runs, so the stored
+ * extension — not the user's original filename — is the truthful source.
+ */
 const contentTypeFor = (file) =>
-    file?.mimetype || MIME_BY_EXT[path.extname(file?.originalname || '').toLowerCase()] || 'application/octet-stream';
+    MIME_BY_EXT[path.extname(file?.path || '').toLowerCase()] || 'application/octet-stream';
+
+/** Filename to forward alongside a stored file, matching its real extension. */
+const forwardNameFor = (file) =>
+    `${path.basename(file.originalname || 'resume', path.extname(file.originalname || ''))}${path.extname(file.path)}`;
 
 // Accept 3 file slots: resume (main), resume_genai, resume_backend
 const uploadFields = upload.fields([
@@ -61,7 +70,7 @@ const uploadFields = upload.fields([
 // POST /api/profile
 router.post('/', uploadFields, async (req, res) => {
     try {
-        const { name, linkedinUrl, githubUrl, portfolioUrl, resumeLink, techStack, experienceYears, experienceMonths, targetRoles } = req.body;
+        const { name, linkedinUrl, githubUrl, portfolioUrl, resumeLink, techStack, experienceYears, experienceMonths, targetRoles, teamMembers } = req.body;
 
         // The account is whoever the token says it is. Taking `email` from the
         // body let any caller overwrite any other user's profile — and the UI
@@ -69,13 +78,20 @@ router.post('/', uploadFields, async (req, res) => {
         const email = currentEmail(req);
         if (!name) return res.status(400).json({ message: 'Name is required.' });
 
-        // The optimizer parses these two slots as PDFs, so reject other formats up front
-        // rather than letting the sync fail later with a confusing error.
-        for (const field of ['resume_genai', 'resume_backend']) {
+        // Word uploads are converted to PDF here so every downstream reader
+        // (text extraction, the optimizer, email attachments) keeps its
+        // PDF-only assumption. `originalname` is left alone — the UI still
+        // shows the user the filename they picked.
+        for (const field of ['resume', 'resume_genai', 'resume_backend']) {
             const file = req.files?.[field]?.[0];
-            if (file && path.extname(file.originalname).toLowerCase() !== '.pdf') {
+            if (!file) continue;
+            try {
+                const { path: storedPath } = await ensurePdf(file);
+                file.path = storedPath;
+            } catch (convErr) {
+                console.error(`[Profile] Word conversion failed for ${field}:`, convErr.message);
                 return res.status(400).json({
-                    message: `${field === 'resume_genai' ? 'Gen AI' : 'Backend'} resume must be a PDF — the optimizer cannot read Word files.`,
+                    message: `Could not read "${file.originalname}". Please re-save it as a PDF and upload again.`,
                 });
             }
         }
@@ -88,6 +104,28 @@ router.post('/', uploadFields, async (req, res) => {
             experienceMonths: experienceMonths ? parseInt(experienceMonths) : 0,
             targetRoles,
         };
+
+        // Sent as a JSON string because the rest of the form is multipart.
+        // Names are deduplicated case-insensitively so History's per-person
+        // counts can't be split by "Ansh" vs "ansh".
+        if (teamMembers !== undefined) {
+            let parsed;
+            try { parsed = JSON.parse(teamMembers); }
+            catch { return res.status(400).json({ message: 'teamMembers must be a JSON array.' }); }
+            if (!Array.isArray(parsed)) return res.status(400).json({ message: 'teamMembers must be a JSON array.' });
+
+            const seen = new Set();
+            updateData.teamMembers = parsed
+                .map((m) => String(typeof m === 'string' ? m : m?.name || '').trim())
+                .filter((n) => {
+                    const key = n.toLowerCase();
+                    if (!n || n.length > 60 || seen.has(key)) return false;
+                    seen.add(key);
+                    return true;
+                })
+                .slice(0, 20)
+                .map((n) => ({ name: n }));
+        }
 
         // ── Main resume (fallback attachment)
         const mainFile = req.files?.resume?.[0];
@@ -126,8 +164,8 @@ router.post('/', uploadFields, async (req, res) => {
                 const fd = new FormData();
                 // Scopes these defaults to one account in the optimizer's store.
                 fd.append('user_email', profile.email);
-                if (srcGenai)   fd.append('resume_genai',   fs.createReadStream(srcGenai.path),   { filename: srcGenai.originalname,   contentType: contentTypeFor(srcGenai) });
-                if (srcBackend) fd.append('resume_backend',  fs.createReadStream(srcBackend.path),  { filename: srcBackend.originalname,  contentType: contentTypeFor(srcBackend) });
+                if (srcGenai)   fd.append('resume_genai',   fs.createReadStream(srcGenai.path),   { filename: forwardNameFor(srcGenai),   contentType: contentTypeFor(srcGenai) });
+                if (srcBackend) fd.append('resume_backend',  fs.createReadStream(srcBackend.path),  { filename: forwardNameFor(srcBackend),  contentType: contentTypeFor(srcBackend) });
                 await axios.post(`${RESUME_OPTIMIZER_URL}/api/save-defaults`, fd, { headers: fd.getHeaders(), timeout: 20000 });
                 console.log(`[Profile] Optimizer resumes synced for ${email}`);
             } catch (optErr) {
@@ -151,6 +189,65 @@ router.post('/', uploadFields, async (req, res) => {
     } catch (err) {
         console.error('Profile save error:', err);
         res.status(500).json({ message: err.message || 'Error saving profile.' });
+    }
+});
+
+// ── Resume slots ────────────────────────────────────────────────────────────
+
+// Slot name → the profile fields it owns. `variant` is the optimizer's own key
+// for the slot, which stays 'genai'/'backend' on the Python side even though
+// the UI now calls them Resume 1 and Resume 2.
+const RESUME_SLOTS = {
+    main:    { pathField: 'resumePath',        nameField: 'resumeOriginalName', variant: null },
+    genai:   { pathField: 'resumeGenaiPath',   nameField: 'resumeGenaiName',    variant: 'genai' },
+    backend: { pathField: 'resumeBackendPath', nameField: 'resumeBackendName',  variant: 'backend' },
+};
+
+// DELETE /api/profile/resume/:slot — remove an uploaded resume so it can be replaced
+router.delete('/resume/:slot', async (req, res) => {
+    try {
+        const slot = RESUME_SLOTS[req.params.slot];
+        if (!slot) return res.status(400).json({ message: 'Unknown resume slot.' });
+
+        const email = currentEmail(req);
+        const profile = await UserProfile.findOne({ email });
+        if (!profile) return res.status(404).json({ message: 'Profile not found.' });
+
+        const filePath = profile[slot.pathField];
+        if (filePath) {
+            try { fs.unlinkSync(filePath); }
+            catch (err) {
+                // Already gone is fine — the point is that it isn't referenced any more.
+                if (err.code !== 'ENOENT') console.warn('[Profile] Could not delete resume file:', err.message);
+            }
+        }
+
+        profile[slot.pathField] = null;
+        profile[slot.nameField] = null;
+        await profile.save();
+
+        // Drop the optimizer's cached copy too, otherwise it would keep
+        // tailoring CVs from a resume the user just removed.
+        let optimizerSyncError = null;
+        if (slot.variant) {
+            try {
+                await axios.delete(`${RESUME_OPTIMIZER_URL}/api/clear-default`, {
+                    params: { user_email: email, variant: slot.variant },
+                    timeout: 20000,
+                });
+            } catch (optErr) {
+                optimizerSyncError = optErr.response?.data?.detail
+                    || (optErr.code === 'ECONNREFUSED'
+                        ? `Resume Optimizer service is not running at ${RESUME_OPTIMIZER_URL}.`
+                        : optErr.message);
+                console.warn('[Profile] Optimizer clear failed:', optimizerSyncError);
+            }
+        }
+
+        res.json({ message: 'Resume removed.', profile, optimizerSyncError });
+    } catch (err) {
+        console.error('Resume delete error:', err);
+        res.status(500).json({ message: err.message || 'Error removing resume.' });
     }
 });
 

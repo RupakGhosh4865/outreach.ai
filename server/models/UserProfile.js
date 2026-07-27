@@ -20,6 +20,17 @@ const userProfileSchema = new mongoose.Schema({
   resumeGenaiName: { type: String, default: null },
   resumeBackendPath: { type: String, default: null },
   resumeBackendName: { type: String, default: null },
+  // People allowed to apply on this account's behalf. Storing them as a list
+  // rather than free text keeps the name spelled the same way every time, which
+  // is what makes the per-person daily counts in History trustworthy.
+  teamMembers: {
+    type: [{
+      name: { type: String, required: true },
+      addedAt: { type: Date, default: Date.now },
+      _id: false,
+    }],
+    default: [],
+  },
   // Per-user Gmail sending. When present, outreach goes out from the user's own
   // mailbox (aligned SPF/DKIM, replies land with them) instead of the shared one.
   gmail: {

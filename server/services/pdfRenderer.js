@@ -6,6 +6,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const TEMPLATE_PATH = path.join(__dirname, '..', 'templates', 'resume.html');
+const LAYOUT_TEMPLATE_PATH = path.join(__dirname, '..', 'templates', 'resume-layout.html');
 
 const esc = (v) => String(v ?? '')
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
@@ -73,10 +74,215 @@ export function renderResumeHtml(resume) {
   `;
 }
 
+// ── Layout-preserving rendering ─────────────────────────────────────────────
+// Driven by the map derived from the user's own resume PDF, so the output keeps
+// their section order, headings, date columns and page count. The generic
+// renderer above is the fallback for accounts with no derived template.
+
+/**
+ * Strip icon-font artefacts from a contact line.
+ *
+ * Resumes built in LaTeX draw phone/email/GitHub icons from a symbol font. Those
+ * code points extract as private-use or unrelated characters ("I", "§", "ï"),
+ * which render as noise once the icon font is gone. Dropping them leaves the
+ * readable contact details intact.
+ */
+function cleanContactLine(text) {
+    return String(text || '')
+        .replace(/[-�]/g, ' ')          // private-use + replacement char
+        .replace(/(^|\s)[|+#§ïïŸ*~^¬](?=\s|$)/g, ' ')     // stray icon stand-ins
+        .replace(/(^|\s)I(?=\s*\()/g, ' ')                // "I (+91) ..." — a phone glyph
+        .replace(/\s{2,}/g, ' ')
+        .replace(/^[\s|·•,-]+|[\s|·•,-]+$/g, '')
+        .trim();
+}
+
+/** Linkify bare URLs and emails in a contact line without trusting its content. */
+function linkifyContact(text) {
+    return esc(text)
+        .replace(/(https?:\/\/[^\s|,]+)/g, '<a href="$1">$1</a>')
+        .replace(/([\w.+-]+@[\w-]+\.[\w.]+)/g, '<a href="mailto:$1">$1</a>');
+}
+
+// Some CVs nest a second marker inside the bullet text ("• ⋄ Built…"); the list
+// already supplies a marker, so a leading one here would double up.
+const LEADING_MARKER_RE = /^[•◦‣∙·▪▫⋄◆●○–—*-]\s*/;
+const stripMarker = (text) => String(text || '').replace(LEADING_MARKER_RE, '').trim();
+
+/** Turn one layout block into HTML, preserving its kind. */
+function renderBlock(block) {
+    if (block.type === 'paragraph') {
+        return `<p>${esc(block.text)}</p>`;
+    }
+    if (block.type === 'labeled') {
+        return `<div class="labeled">
+        <span class="labeled-key">${esc(block.label)}</span>
+        <span class="labeled-val">${esc(block.text)}</span>
+      </div>`;
+    }
+    if (block.type === 'bullets') {
+        const items = arr(block.items).map(stripMarker).filter(Boolean);
+        return items.length ? `<ul>${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : '';
+    }
+    if (block.type === 'entry') {
+        const bullets = arr(block.bullets).map(stripMarker).filter(Boolean);
+        return `<article class="entry">
+        <div class="entry-head">
+          <span class="entry-title">${esc(block.left)}</span>
+          ${block.right ? `<span class="entry-meta">${esc(block.right)}</span>` : ''}
+        </div>
+        ${block.sub ? `<div class="entry-sub">${esc(block.sub)}</div>` : ''}
+        ${bullets.length ? `<ul>${bullets.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>` : ''}
+      </article>`;
+    }
+    return '';
+}
+
+/** Render a layout map to the HTML body of the layout template. */
+export function renderLayoutHtml(layout) {
+    const header = layout?.header || {};
+    const contact = arr(header.contact_lines).concat(arr(header.extra_lines))
+        .map(cleanContactLine).filter(Boolean);
+
+    const sections = arr(layout?.sections).map((section) => {
+        const blocks = arr(section.blocks).map(renderBlock).join('');
+        if (!blocks && !section.heading) return '';
+        return `<section>
+        ${section.heading ? `<h2>${esc(section.heading)}</h2>` : ''}
+        ${blocks}
+      </section>`;
+    }).join('');
+
+    return `
+    <header>
+      ${header.name ? `<h1>${esc(header.name)}</h1>` : ''}
+      ${header.title ? `<div class="role">${esc(header.title)}</div>` : ''}
+      ${contact.length ? `<div class="contact">${contact.map((c) => `<div>${linkifyContact(c)}</div>`).join('')}</div>` : ''}
+    </header>
+    ${sections}
+  `;
+}
+
+/**
+ * Render a layout map to a PDF, using the type sizes and margins observed in
+ * the source resume rather than a house style.
+ *
+ * @returns {Promise<string>} absolute path to the written PDF
+ */
+// Serif families seen in LaTeX-built CVs. The rendered document should keep the
+// source's character, and a serif CV re-set in Calibri no longer looks like the
+// document the candidate approved.
+const SERIF_RE = /palladio|palatino|times|georgia|garamond|book|charter|minion|serif|roman|utopia|libertine/i;
+
+/** Rendered page count, used to hold the output to the original's length. */
+async function pdfPageCount(filePath) {
+    const { PDFParse } = await import('pdf-parse');
+    const parser = new PDFParse({ data: fs.readFileSync(filePath) });
+    try {
+        const info = await parser.getInfo();
+        return info?.total ?? info?.numpages ?? null;
+    } catch {
+        return null; // don't fail a render just because we couldn't count
+    } finally {
+        await parser.destroy?.().catch?.(() => { /* already released */ });
+    }
+}
+
+export async function renderLayoutPdf(layout, outPath) {
+    const fonts = layout?.fonts || {};
+    const pt = (v, fallback) => `${Number(v) > 0 ? Number(v) : fallback}pt`;
+    const family = fonts.body?.family || '';
+
+    fs.mkdirSync(path.dirname(outPath), { recursive: true });
+
+    // Margins come from the source document where we measured them, clamped so
+    // an odd measurement can't produce an unreadable page. Expressed in mm:
+    // Puppeteer's `margin` accepts px/in/cm/mm but not pt.
+    const ptToMm = (v) => `${(v * 0.352778).toFixed(2)}mm`;
+    const clampMm = (v, lo, hi, fallback) => {
+        const n = Number(v);
+        return ptToMm(Number.isFinite(n) && n > 0 ? Math.min(hi, Math.max(lo, n)) : fallback);
+    };
+    const margin = {
+        top: ptToMm(30),
+        bottom: ptToMm(26),
+        left: clampMm(layout?.margins?.left, 24, 72, 36),
+        right: clampMm(layout?.margins?.right, 24, 72, 36),
+    };
+
+    const template = fs.readFileSync(LAYOUT_TEMPLATE_PATH, 'utf-8');
+    const body = renderLayoutHtml(layout);
+
+    // PDF points map 1:1 to CSS pt, so the sizes measured off the source PDF
+    // carry over directly. They are injected as a stylesheet rather than an
+    // inline style attribute — font stacks contain quotes, which would close
+    // the attribute and silently drop every variable.
+    const buildHtml = (density) => template
+        .replace('/*VARS*/', `:root {
+            --body-font: ${SERIF_RE.test(family) ? '"Palatino Linotype", Palatino, "Book Antiqua", Georgia, "Times New Roman", serif' : '"Calibri", "Carlito", "Helvetica Neue", Arial, sans-serif'};
+            --body-size: ${pt(fonts.body?.size, 10)};
+            --name-size: ${pt(fonts.name?.size, 18)};
+            --heading-size: ${pt(fonts.heading?.size, 12)};
+            --header-align: ${layout?.header?.align === 'center' ? 'center' : 'left'};
+            --density: ${density};
+        }`)
+        .replace('<!--RESUME-->', body);
+
+    const target = Number(layout?.page_count) || null;
+    // Tailored text runs a little longer than the original, which can push a
+    // one-page CV onto a second page — the most visible way "same layout" fails.
+    // Tighten leading and block spacing until it fits, rather than dropping
+    // content or shrinking the type the user chose.
+    const densities = [1, 0.92, 0.84, 0.76, 0.7];
+
+    const browser = await getBrowser();
+    let pages = null;
+
+    for (let i = 0; i < densities.length; i += 1) {
+        const page = await browser.newPage();
+        try {
+            await page.setContent(buildHtml(densities[i]), { waitUntil: 'domcontentloaded' });
+            await page.pdf({ path: outPath, format: 'A4', printBackground: true, margin });
+        } finally {
+            await page.close().catch(() => { /* page already gone */ });
+        }
+
+        if (!target || i === densities.length - 1) break;
+        pages = await pdfPageCount(outPath);
+        if (pages == null || pages <= target) break;
+    }
+
+    if (target && pages && pages > target) {
+        console.warn(`[Resume] Tailored CV runs to ${pages} page(s) against an original of ${target}.`);
+    }
+
+    const { size } = fs.statSync(outPath);
+    if (size < 1000) throw new Error(`Rendered PDF looks empty (${size} bytes)`);
+    return outPath;
+}
+
+/** Plain-text version of a layout map, used to enrich the email prompt. */
+export function layoutToText(layout) {
+    const lines = [layout?.header?.name, layout?.header?.title];
+    for (const section of arr(layout?.sections)) {
+        if (section.heading) lines.push(`\n${section.heading}`);
+        for (const block of arr(section.blocks)) {
+            if (block.type === 'paragraph') lines.push(block.text);
+            else if (block.type === 'bullets') lines.push(...arr(block.items));
+            else if (block.type === 'entry') {
+                lines.push([block.left, block.right].filter(Boolean).join(' '));
+                if (block.sub) lines.push(block.sub);
+                lines.push(...arr(block.bullets));
+            }
+        }
+    }
+    return lines.filter(Boolean).join('\n').slice(0, 4000);
+}
+
 let browserPromise = null;
 
 /** One shared headless browser for the process; relaunched if it dies. */
-async function getBrowser() {
+export async function getBrowser() {
     if (!browserPromise) {
         browserPromise = (async () => {
             const { default: puppeteer } = await import('puppeteer');

@@ -84,6 +84,12 @@ const jobApplicationSchema = new mongoose.Schema({
     appliedAt: Date,
     approvedAt: Date,
     deniedAt: Date,
+
+    // Who drove this application (null = the account owner), and how long it took
+    // from the job entering the pipeline to the email going out.
+    appliedBy: { type: String, default: null },
+    applyStartedAt: { type: Date, default: null },
+    applyDurationMs: { type: Number, default: null },
 }, { timestamps: true });
 
 // One application per user per job posting.

@@ -27,6 +27,7 @@ import {
 import { getCompanyDomain, findEmployees, saveCompanyContacts } from '../services/contacts.js';
 import { chatJson } from '../services/llm.js';
 import { claimDueJobs } from '../services/jobClaim.js';
+import { recordApplied, findApplied } from '../services/appliedJobs.js';
 import { requireAuth, currentEmail } from '../middleware/auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -62,6 +63,32 @@ async function fetchUrlContent(url) {
 // ─── Helpers ────────────────────────────────────────────────────────────────
 // Contact discovery (getCompanyDomain / findEmployees / saveCompanyContacts) lives
 // in services/contacts.js. This file used to carry a second, drifting copy.
+
+/**
+ * Resolve who to credit an application to.
+ *
+ * Returns null (the account owner) unless the supplied name matches one of the
+ * team members the owner registered. Accepting arbitrary strings would let a
+ * typo split one person's daily count across two names.
+ */
+async function resolveApplier(userEmail, appliedBy) {
+    const name = String(appliedBy || '').trim();
+    if (!name) return null;
+
+    const profile = await UserProfile.findOne({ email: userEmail }).select('teamMembers').lean();
+    const match = (profile?.teamMembers || []).find(
+        (m) => m.name.toLowerCase() === name.toLowerCase()
+    );
+    return match ? match.name : null;
+}
+
+/** Client-reported wizard start time, ignored if absent, unparseable or in the future. */
+function parseStartedAt(value) {
+    if (!value) return null;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime()) || date > new Date()) return null;
+    return date;
+}
 
 /** Scrape LinkedIn job post (best-effort, public posts) */
 async function scrapeLinkedInJob(url) {
@@ -173,7 +200,20 @@ async function fireScheduledJob(jobRecord) {
         jobRecord.status = sentTo.length > 0 ? 'sent' : 'failed';
         jobRecord.sentAt = new Date();
         jobRecord.isScheduled = false;
+        // applyDurationMs was already set when the user scheduled this — measuring
+        // to the cron firing would report the wait, not the work.
         await jobRecord.save();
+
+        if (sentTo.length > 0) {
+            await recordApplied({
+                userEmail: jobRecord.userEmail,
+                title: jobRecord.jobTitle,
+                company: jobRecord.companyName,
+                applyUrl: jobRecord.linkedinUrl,
+                appliedBy: jobRecord.appliedBy,
+                jobRequestId: jobRecord._id,
+            });
+        }
         console.log(`[Scheduler] Fired job ${jobRecord._id} → sent to ${sentTo.length} recipient(s)`);
     } catch (err) {
         console.error('[Scheduler] Error firing job:', err.message);
@@ -301,6 +341,25 @@ Use an empty string for anything the text does not contain.`,
             await saveCompanyContacts(extracted.companyName, null, tempEmps, 'scrape');
         }
 
+        // One job, one application: refuse a posting this account has already
+        // applied to. Checked after extraction because the title and company are
+        // what identify a job when the URL differs between listings.
+        const already = await findApplied(currentEmail(req), {
+            title: extracted.jobTitle,
+            company: extracted.companyName,
+            applyUrl: url,
+        });
+        if (already) {
+            return res.status(409).json({
+                alreadyApplied: true,
+                appliedAt: already.appliedAt,
+                appliedBy: already.appliedBy,
+                jobTitle: already.title,
+                companyName: already.company,
+                message: `You already applied to ${already.title || 'this role'}${already.company ? ` at ${already.company}` : ''} on ${new Date(already.appliedAt).toLocaleDateString()}.`,
+            });
+        }
+
         console.log('Extracted job details:', extracted, '| Post emails found:', postEmails);
         res.json({ ...extracted, postEmails, message: 'Job details extracted successfully!' });
     } catch (err) {
@@ -406,6 +465,23 @@ Use an empty string for anything the text does not contain.`,
             maxTokens: 1024,
             label: 'autopilot-extract',
         });
+
+        // 2b. Stop before doing any work if this posting has already been applied to.
+        const alreadyApplied = await findApplied(userEmail, {
+            title: job.jobTitle,
+            company: job.companyName,
+            applyUrl: url,
+        });
+        if (alreadyApplied) {
+            return res.status(409).json({
+                alreadyApplied: true,
+                appliedAt: alreadyApplied.appliedAt,
+                appliedBy: alreadyApplied.appliedBy,
+                jobTitle: alreadyApplied.title,
+                companyName: alreadyApplied.company,
+                message: `You already applied to ${alreadyApplied.title || 'this role'}${alreadyApplied.company ? ` at ${alreadyApplied.company}` : ''} on ${new Date(alreadyApplied.appliedAt).toLocaleDateString()}.`,
+            });
+        }
 
         // 3a. Extract emails directly shared in the LinkedIn post text
         const emailRegex = /[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}/g;
@@ -550,9 +626,16 @@ router.post('/send', async (req, res) => {
             employees,
             followUpDays,
             scheduledAt,  // ISO datetime string — null / undefined = send immediately
+            appliedBy,    // name of the person applying on the owner's behalf
+            applyStartedAt, // ISO datetime the wizard was started, for the timer
         } = req.body;
 
         const userEmail = currentEmail(req);
+
+        // Only a name the owner has actually registered is accepted, so History's
+        // per-person counts can't be skewed by an arbitrary string.
+        const applierName = await resolveApplier(userEmail, appliedBy);
+        const startedAt = parseStartedAt(applyStartedAt);
 
         // A manual address is a recipient like any other. Previously it satisfied
         // validation without being added to `recipients`, and the scheduled path
@@ -619,6 +702,10 @@ router.post('/send', async (req, res) => {
                 status: 'draft',
                 scheduledAt: new Date(scheduledAt),
                 isScheduled: true,
+                appliedBy: applierName,
+                applyStartedAt: startedAt,
+                // Measured now, not when the cron fires: the user's work ends here.
+                applyDurationMs: startedAt ? Date.now() - startedAt.getTime() : null,
                 optimizedResumeUsed,
                 optimizedMatchScore,
                 optimizedAddedKeywords,
@@ -665,6 +752,9 @@ router.post('/send', async (req, res) => {
             sentTo,
             status: sentTo.length > 0 ? 'sent' : 'failed',
             sentAt: new Date(),
+            appliedBy: applierName,
+            applyStartedAt: startedAt,
+            applyDurationMs: startedAt ? Date.now() - startedAt.getTime() : null,
             optimizedResumeUsed,
             optimizedMatchScore,
             optimizedAddedKeywords,
@@ -678,6 +768,19 @@ router.post('/send', async (req, res) => {
                 : null,
         });
         await jobRecord.save();
+
+        // Record it in the applied-jobs ledger so this posting is filtered out of
+        // future scans and blocked if its URL is pasted again.
+        if (sentTo.length > 0) {
+            await recordApplied({
+                userEmail,
+                title: jobTitle,
+                company: companyName,
+                applyUrl: linkedinUrl,
+                appliedBy: applierName,
+                jobRequestId: jobRecord._id,
+            });
+        }
 
         res.json({
             message: attachmentStatus === 'missing'
@@ -748,6 +851,11 @@ const publicOptimResult = (key, result) => ({
     atsTips: result.atsTips,
     projectSuggestions: result.projectSuggestions,
     pdfUrl: `/api/jobs/optimize-resume/pdf?key=${key}`,
+    // Present only on the layout-preserving path. Drives the live document
+    // preview, which shows the rewrite happening inside the user's own CV.
+    layout: result.layout,
+    originalLayout: result.originalLayout,
+    changes: result.changes,
 });
 
 /** Cache entries are per-user; never serve one to a different account. */
@@ -756,6 +864,24 @@ function ownedEntry(req, key) {
     if (!entry) return null;
     return entry.userEmail === currentEmail(req) ? entry : null;
 }
+
+// GET /api/jobs/resume-template — this user's derived CV layout
+// Lets the optimisation UI render the real document while it is being tailored,
+// instead of showing an abstract progress bar over nothing.
+router.get('/resume-template', async (req, res) => {
+    try {
+        const { data } = await axios.get(`${process.env.RESUME_OPTIMIZER_URL || 'http://localhost:8002'}/api/template`, {
+            params: { user_email: currentEmail(req) },
+            timeout: 15000,
+        });
+        res.json(data);
+    } catch (err) {
+        // No template is an ordinary state (legacy uploads) — the panel simply
+        // falls back to a plain progress card.
+        const status = err?.response?.status === 404 ? 404 : 502;
+        res.status(status).json({ message: 'No resume template available.' });
+    }
+});
 
 // POST /api/jobs/optimize-resume — kick off (or reuse) optimization for a JD
 router.post('/optimize-resume', async (req, res) => {
@@ -779,9 +905,21 @@ router.get('/optimize-resume/status', (req, res) => {
     const entry = ownedEntry(req, req.query.key);
     if (!entry) return res.status(404).json({ status: 'unknown' });
     if (entry.status === 'done' && entry.result) {
-        return res.json({ status: 'done', result: publicOptimResult(req.query.key, entry.result) });
+        return res.json({
+            status: 'done',
+            percent: 100,
+            stage: 'done',
+            stageLabel: 'Ready',
+            result: publicOptimResult(req.query.key, entry.result),
+        });
     }
-    res.json({ status: entry.status, error: entry.error || undefined });
+    res.json({
+        status: entry.status,
+        stage: entry.stage,
+        stageLabel: entry.stageLabel,
+        percent: entry.percent,
+        error: entry.error || undefined,
+    });
 });
 
 // GET /api/jobs/optimize-resume/pdf?key= — inline preview / download
