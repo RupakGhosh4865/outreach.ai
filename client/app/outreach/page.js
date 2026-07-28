@@ -198,8 +198,6 @@ export default function OutreachPage() {
     // and reported on send, so History can show how long the application took.
     const [teamMembers, setTeamMembers] = useState([]);
     const [ownerName, setOwnerName] = useState('');
-    // Which mailbox the send will actually leave from, shown before sending.
-    const [sendingFrom, setSendingFrom] = useState(null); // { connected, address }
     const [appliedBy, setAppliedBy] = useState(''); // '' = the account owner
     const [applyStartedAt, setApplyStartedAt] = useState(null);
     const [alreadyApplied, setAlreadyApplied] = useState(null);
@@ -219,10 +217,6 @@ export default function OutreachPage() {
                 if (!d?.profile) return;
                 setTeamMembers((d.profile.teamMembers || []).map((m) => m.name));
                 setOwnerName(d.profile.name || '');
-                setSendingFrom({
-                    connected: Boolean(d.profile.gmail?.connectedAt),
-                    address: d.profile.gmail?.address || d.profile.email,
-                });
             })
             .catch(() => { /* no profile yet — attribution just stays as the owner */ });
 
@@ -1208,26 +1202,6 @@ export default function OutreachPage() {
                                             </ul>
                                         )}
                                     </div>
-
-                                    {/* The sending identity, surfaced at the moment it matters.
-                                        Without a connected mailbox these go out from the shared
-                                        app address and replies never reach the user. */}
-                                    {sendingFrom && !sendingFrom.connected && (
-                                        <Alert tone="warning" className="mb-6">
-                                            <span className="font-semibold">Sending from the shared app mailbox.</span>{' '}
-                                            Recipients won&apos;t see your address and replies won&apos;t reach you.{' '}
-                                            <Link href="/profile" className="font-semibold underline underline-offset-2">
-                                                Connect your Gmail
-                                            </Link>{' '}
-                                            to send as yourself.
-                                        </Alert>
-                                    )}
-                                    {sendingFrom?.connected && (
-                                        <p className="mb-6 flex items-center gap-2 text-sm text-subtle">
-                                            <Mail className="size-3.5" aria-hidden="true" />
-                                            Sending from <span className="font-semibold text-text">{sendingFrom.address}</span>
-                                        </p>
-                                    )}
 
                                     {/* Only shown once the owner has registered someone —
                                         otherwise every application is simply theirs. */}
