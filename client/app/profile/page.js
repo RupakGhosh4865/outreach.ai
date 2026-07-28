@@ -3,14 +3,13 @@
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import {
-    Check, FileText, Globe, Loader2, Mail, MailCheck, Plus, Save, Sparkles, Trash2,
-    Upload, User, Users,
+    Check, FileText, Globe, Loader2, Plus, Save, Sparkles, Trash2, Upload, User, Users,
 } from 'lucide-react';
 import AuthGuard from '../components/AuthGuard';
 import BaseCvEditor from '../components/BaseCvEditor';
 import { Alert, Badge, Button, Card, CardTitle, Field, Input, cn } from '../components/ui';
 import { useToast } from '../components/ui/Toast';
-import { apiDelete, apiGet, apiPost, apiUrl } from '@/lib/api';
+import { apiDelete, apiGet, apiPost } from '@/lib/api';
 
 /**
  * A file slot styled as a drop target. The underlying control stays a real
@@ -102,27 +101,12 @@ export default function ProfilePage() {
     const [files, setFiles] = useState({ resume: null, resume_genai: null, resume_backend: null });
     const [teamMembers, setTeamMembers] = useState([]);
     const [newMember, setNewMember] = useState('');
-    const [disconnecting, setDisconnecting] = useState(false);
     const [existing, setExisting] = useState(null);
     const [loading, setLoading] = useState(false);
     // Toasts come from the app-level provider (one aria-live region, dismissible).
     const { toast: addToast } = useToast();
 
     const handleFileChange = (fieldName, file) => setFiles(f => ({ ...f, [fieldName]: file }));
-
-    /** Revert to the shared app mailbox. */
-    async function disconnectGmail() {
-        setDisconnecting(true);
-        try {
-            await apiPost('/api/auth/disconnect-gmail', {});
-            const d = await apiGet('/api/profile');
-            setExisting(d.profile);
-            addToast('Gmail disconnected — outreach will send from the shared mailbox.', 'success');
-        } catch (err) {
-            addToast(err.message || 'Could not disconnect Gmail.', 'error');
-        }
-        setDisconnecting(false);
-    }
 
     /** Add an applier, ignoring duplicates so a name maps to exactly one person. */
     function addMember() {
@@ -214,9 +198,6 @@ export default function ProfilePage() {
     }
 
     const optimizerReady = Boolean(existing?.resumeGenaiName && existing?.resumeBackendName);
-    // `connectedAt` is the reliable signal — the refresh token is never sent to
-    // the client, so its absence here says nothing about whether one exists.
-    const gmailConnected = Boolean(existing?.gmail?.connectedAt);
 
     return (
         <AuthGuard>
@@ -359,58 +340,6 @@ export default function ProfilePage() {
                                 onChange={(e) => setForm((f) => ({ ...f, resumeLink: e.target.value }))}
                             />
                         </Field>
-                    </Card>
-
-                    {/* ── Sending mailbox ──────────────────────────────────── */}
-                    <Card className="mb-5">
-                        <CardTitle
-                            icon={gmailConnected ? MailCheck : Mail}
-                            accent={gmailConnected ? 'success' : 'warning'}
-                            title="Sending mailbox"
-                            description="Which account your outreach actually goes out from."
-                            action={
-                                gmailConnected
-                                    ? <Badge tone="success" icon={Check}>Connected</Badge>
-                                    : <Badge tone="warning">Shared mailbox</Badge>
-                            }
-                        />
-
-                        {gmailConnected ? (
-                            <>
-                                <p className="mb-4 text-sm text-muted">
-                                    Emails send from{' '}
-                                    <span className="font-semibold text-text">{existing.gmail.address || existing.email}</span>
-                                    {existing?.gmail?.connectedAt && (
-                                        <> · connected {new Date(existing.gmail.connectedAt).toLocaleDateString()}</>
-                                    )}
-                                    . Replies land in that inbox.
-                                </p>
-                                <Button
-                                    type="button"
-                                    variant="secondary"
-                                    size="sm"
-                                    loading={disconnecting}
-                                    disabled={disconnecting}
-                                    onClick={disconnectGmail}
-                                >
-                                    Disconnect
-                                </Button>
-                            </>
-                        ) : (
-                            <>
-                                <p className="mb-4 text-sm text-muted">
-                                    Your outreach currently sends from the shared app mailbox, so recipients
-                                    see that address and replies do not reach you. Connect your Google account
-                                    to send as yourself.
-                                </p>
-                                {/* A full-page redirect, not a fetch — the OAuth consent screen
-                                    cannot be loaded with an Authorization header. */}
-                                <a href={apiUrl('/api/auth/google/connect-gmail')} className="ui-btn ui-btn-primary">
-                                    <Mail className="size-4" aria-hidden="true" />
-                                    Connect Gmail
-                                </a>
-                            </>
-                        )}
                     </Card>
 
                     {/* ── Resumes ──────────────────────────────────────────── */}
