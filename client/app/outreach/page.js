@@ -198,9 +198,14 @@ export default function OutreachPage() {
     // and reported on send, so History can show how long the application took.
     const [teamMembers, setTeamMembers] = useState([]);
     const [ownerName, setOwnerName] = useState('');
+    // Which mailbox the send will actually leave from, shown before sending.
+    const [sendingFrom, setSendingFrom] = useState(null); // { connected, address }
     const [appliedBy, setAppliedBy] = useState(''); // '' = the account owner
     const [applyStartedAt, setApplyStartedAt] = useState(null);
     const [alreadyApplied, setAlreadyApplied] = useState(null);
+    // Opt-in — a cover letter is welcome in some outreach and noise in a short
+    // referral ask, so the user decides per send.
+    const [attachCoverLetter, setAttachCoverLetter] = useState(false);
 
     /** Start the apply clock on first real action; later calls are no-ops. */
     const beginApply = () => setApplyStartedAt((prev) => prev || new Date().toISOString());
@@ -214,6 +219,10 @@ export default function OutreachPage() {
                 if (!d?.profile) return;
                 setTeamMembers((d.profile.teamMembers || []).map((m) => m.name));
                 setOwnerName(d.profile.name || '');
+                setSendingFrom({
+                    connected: Boolean(d.profile.gmail?.connectedAt),
+                    address: d.profile.gmail?.address || d.profile.email,
+                });
             })
             .catch(() => { /* no profile yet — attribution just stays as the owner */ });
 
@@ -534,6 +543,7 @@ export default function OutreachPage() {
                 scheduledAt: applyTiming === 'schedule' ? scheduledAt : null,
                 appliedBy: appliedBy || undefined,
                 applyStartedAt: applyStartedAt || undefined,
+                attachCoverLetter,
             });
             setResumeOptimizing(false);
 
@@ -875,7 +885,12 @@ export default function OutreachPage() {
                         </Card>
 
                         {/* Feature panels */}
-                        <ResumeOptimizerPanel optimizeState={optimizeState} compact={isExtension} />
+                        <ResumeOptimizerPanel
+                            optimizeState={optimizeState}
+                            compact={isExtension}
+                            attachCover={attachCoverLetter}
+                            onAttachCoverChange={setAttachCoverLetter}
+                        />
                         <ApplicationPipeline userEmail={userEmail} isExtension={isExtension} refreshKey={pipelineKey} />
                         <JobRadar userEmail={userEmail} isExtension={isExtension} onApplicationChange={refreshPipeline} />
                         <JobSources userEmail={userEmail} isExtension={isExtension} onApplicationChange={refreshPipeline} />
@@ -1137,7 +1152,12 @@ export default function OutreachPage() {
                 {/* ══ STEP 3 — Email & send ═════════════════════════════════════ */}
                 {step === 2 && (
                     <div className="space-y-5">
-                        <ResumeOptimizerPanel optimizeState={optimizeState} compact={isExtension} />
+                        <ResumeOptimizerPanel
+                            optimizeState={optimizeState}
+                            compact={isExtension}
+                            attachCover={attachCoverLetter}
+                            onAttachCoverChange={setAttachCoverLetter}
+                        />
 
                         <Card>
                             <CardTitle icon={Mail} title="Your email" description="Review and edit before it goes out." />
@@ -1188,6 +1208,26 @@ export default function OutreachPage() {
                                             </ul>
                                         )}
                                     </div>
+
+                                    {/* The sending identity, surfaced at the moment it matters.
+                                        Without a connected mailbox these go out from the shared
+                                        app address and replies never reach the user. */}
+                                    {sendingFrom && !sendingFrom.connected && (
+                                        <Alert tone="warning" className="mb-6">
+                                            <span className="font-semibold">Sending from the shared app mailbox.</span>{' '}
+                                            Recipients won&apos;t see your address and replies won&apos;t reach you.{' '}
+                                            <Link href="/profile" className="font-semibold underline underline-offset-2">
+                                                Connect your Gmail
+                                            </Link>{' '}
+                                            to send as yourself.
+                                        </Alert>
+                                    )}
+                                    {sendingFrom?.connected && (
+                                        <p className="mb-6 flex items-center gap-2 text-sm text-subtle">
+                                            <Mail className="size-3.5" aria-hidden="true" />
+                                            Sending from <span className="font-semibold text-text">{sendingFrom.address}</span>
+                                        </p>
+                                    )}
 
                                     {/* Only shown once the owner has registered someone —
                                         otherwise every application is simply theirs. */}

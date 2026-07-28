@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { fileURLToPath } from 'url';
-import { renderResumePdf, resumeToText, renderLayoutPdf, layoutToText } from './pdfRenderer.js';
+import { resumeToText, renderLayoutPdf, layoutToText, resumeToLayout, renderCoverPdf } from './pdfRenderer.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -100,8 +100,9 @@ setInterval(() => {
     const now = Date.now();
     for (const [key, entry] of optimCache) {
         if (now - entry.createdAt > OPTIM_TTL_MS) {
-            if (entry.result?.pdfPath) {
-                try { fs.unlinkSync(entry.result.pdfPath); }
+            for (const file of [entry.result?.pdfPath, entry.result?.coverPdfPath]) {
+                if (!file) continue;
+                try { fs.unlinkSync(file); }
                 catch (err) {
                     if (err.code !== 'ENOENT') console.warn('[ResumeCache] Could not remove PDF:', err.message);
                 }
@@ -127,12 +128,40 @@ export const getCacheEntry = (key) => optimCache.get(key);
 export const OPTIM_STAGES = [
     { key: 'reading', label: 'Reading your CV', percent: 12 },
     { key: 'analysing', label: 'Analysing role requirements', percent: 30 },
-    { key: 'rewriting', label: 'Rewriting to match the role', percent: 72 },
-    { key: 'rendering', label: 'Rendering PDF layout', percent: 92 },
+    { key: 'rewriting', label: 'Rewriting to match the role', percent: 66 },
+    { key: 'rendering', label: 'Rendering PDF layout', percent: 82 },
+    { key: 'covering', label: 'Writing your cover letter', percent: 94 },
     { key: 'done', label: 'Ready', percent: 100 },
 ];
 
 const stageInfo = (key) => OPTIM_STAGES.find((s) => s.key === key) || OPTIM_STAGES[0];
+
+/**
+ * Write and render the cover letter for a finished CV.
+ *
+ * Never throws: a missing cover letter is a lesser outcome than a failed
+ * optimisation, so the CV is still returned if this step fails.
+ *
+ * @returns {Promise<{coverText: string, coverPdfPath: string}|null>}
+ */
+async function buildCoverLetter({ jobDescription, layout, resumeText, pdfPath }) {
+    try {
+        const { data } = await axios.post(
+            `${RESUME_OPTIMIZER_URL}/api/resume-cover`,
+            { job_description: jobDescription, resume_text: resumeText, candidate_name: layout?.header?.name },
+            { timeout: 120000 }
+        );
+        const coverText = (data?.cover_letter || '').trim();
+        if (!coverText) return null;
+
+        const coverPdfPath = pdfPath.replace(/\.pdf$/i, '_cover.pdf');
+        await renderCoverPdf({ layout, text: coverText, outPath: coverPdfPath });
+        return { coverText, coverPdfPath };
+    } catch (err) {
+        console.warn('[Resume] Cover letter step failed:', describeAxiosError(err));
+        return null;
+    }
+}
 
 /**
  * Tailor the user's resume inside its own layout.
@@ -157,9 +186,19 @@ async function buildLayoutResume({ jobDescription, profile, outPath, onStage }) 
     const matchScore = Number(data.match_score) || 0;
     console.log(`[Resume] Tailored CV in its own layout (score ${matchScore}, ${data.changes?.length || 0} edits) → ${path.basename(pdfPath)}`);
 
+    onStage?.('covering');
+    const cover = await buildCoverLetter({
+        jobDescription,
+        layout: data.layout,
+        resumeText: data.resume_text || layoutToText(data.layout),
+        pdfPath,
+    });
+
     return {
         ok: true,
         pdfPath,
+        coverText: cover?.coverText || null,
+        coverPdfPath: cover?.coverPdfPath || null,
         layout: data.layout,
         originalLayout: data.original_layout,
         changes: data.changes || [],
@@ -168,6 +207,9 @@ async function buildLayoutResume({ jobDescription, profile, outPath, onStage }) 
         source: data.source,
         addedKeywords: data.added_keywords || [],
         removedKeywords: data.removed_keywords || [],
+        matchedKeywords: data.matched_keywords || [],
+        missingKeywords: data.missing_keywords || [],
+        gaps: data.gaps || [],
         atsTips: data.ats_tips || [],
         projectSuggestions: [],
     };
@@ -229,20 +271,36 @@ export async function buildOptimizedResume({ jobDescription, profile, outPath, o
 
         onStage?.('rendering');
         const pdfPath = outPath || path.join(TMP_RESUME_DIR, `optimized_${Date.now()}.pdf`);
-        await renderResumePdf(resume, pdfPath);
+        // Rendered through the same layout renderer as the primary path, using a
+        // fixed studio preset. The old generic renderer produced a visibly
+        // plainer document that users flagged as "not my CV".
+        const layout = resumeToLayout(resume);
+        await renderLayoutPdf(layout, pdfPath);
 
         const matchScore = Number(data.match_score) || 0;
         console.log(`[Resume] Built job-matched resume (score ${matchScore}, source ${data.source}) → ${path.basename(pdfPath)}`);
 
+        onStage?.('covering');
+        const cover = await buildCoverLetter({
+            jobDescription, layout, resumeText: resumeToText(resume), pdfPath,
+        });
+
         return {
             ok: true,
             pdfPath,
+            coverText: cover?.coverText || null,
+            coverPdfPath: cover?.coverPdfPath || null,
             resume,
+            layout,
+            changes: [],
             resumeText: resumeToText(resume),
             matchScore,
             source: data.source,
             addedKeywords: data.added_keywords || [],
             removedKeywords: data.removed_keywords || [],
+            matchedKeywords: data.matched_keywords || [],
+            missingKeywords: data.missing_keywords || [],
+            gaps: data.gaps || [],
             atsTips: data.ats_tips || [],
             projectSuggestions: data.project_suggestions || [],
         };

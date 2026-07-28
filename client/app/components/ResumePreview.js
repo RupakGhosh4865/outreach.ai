@@ -106,7 +106,7 @@ function Block({ block, change, revealed }) {
     return null;
 }
 
-export default function ResumePreview({ layout, changes = [], running = false, className }) {
+export default function ResumePreview({ layout, changes = [], running = false, expanded = false, className }) {
     const changeMap = useMemo(() => indexChanges(changes), [changes]);
     // Ids are revealed one at a time so the rewrite reads as it happens rather
     // than the whole document flipping at once.
@@ -149,7 +149,14 @@ export default function ResumePreview({ layout, changes = [], running = false, c
                 />
             )}
 
-            <div className="max-h-96 overflow-y-auto p-4 text-[7.5px] leading-snug sm:text-[9px]">
+            <div
+                className={cn(
+                    'overflow-y-auto p-4 text-[7.5px] leading-snug sm:text-[9px]',
+                    // Expanded shows the document at a readable size; collapsed
+                    // is a thumbnail that keeps the panel scannable.
+                    expanded ? 'max-h-[70vh] sm:text-[11px]' : 'max-h-96',
+                )}
+            >
                 <div className={cn('mb-2', header.align === 'center' && 'text-center')}>
                     {header.name && <div className="text-[15px] font-extrabold tracking-wide">{header.name}</div>}
                     {header.title && <div className="text-[9px] text-[#3c4149]">{header.title}</div>}

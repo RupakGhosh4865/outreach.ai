@@ -164,9 +164,22 @@ def _migrate_defaults_to_per_user():
 
 init_db()
 
+# Resume slots, in the order tailoring prefers them. "main" is the resume every
+# user actually fills in; it was previously excluded, so an account with only a
+# main resume had no layout template and every tailor request 404'd into the
+# generic builder.
+SLOT_VARIANTS = ("main", "genai", "backend")
+
+# `IN (?, ?, ?)` built from the slot list so adding a slot can't leave a query
+# silently filtering on a stale set.
+def _slot_placeholders() -> str:
+    return ", ".join("?" for _ in SLOT_VARIANTS)
+
+
 @app.post("/api/save-defaults")
 async def save_defaults(
     user_email: str = Form(...),
+    resume_main: UploadFile = File(None),
     resume_genai: UploadFile = File(None),
     resume_backend: UploadFile = File(None)
 ):
@@ -178,7 +191,7 @@ async def save_defaults(
         cursor = conn.cursor()
 
         derived = {}
-        for variant, upload in (("genai", resume_genai), ("backend", resume_backend)):
+        for variant, upload in (("main", resume_main), ("genai", resume_genai), ("backend", resume_backend)):
             if not upload:
                 continue
             raw = await upload.read()
@@ -224,8 +237,8 @@ async def clear_default(user_email: str, variant: str):
     """Forget one saved resume. Called when the user deletes that slot in their
     profile — without this the optimizer would keep tailoring CVs from a resume
     the user has already removed."""
-    if variant not in ("genai", "backend"):
-        raise HTTPException(status_code=400, detail="variant must be 'genai' or 'backend'.")
+    if variant not in SLOT_VARIANTS:
+        raise HTTPException(status_code=400, detail=f"variant must be one of {', '.join(SLOT_VARIANTS)}.")
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -260,7 +273,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=_allowed_origins,
     allow_credentials=False,
-    allow_methods=["GET", "POST", "DELETE"],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
 )
 
@@ -530,9 +543,13 @@ Hard rules:
 - NEVER invent employers, job titles, degrees, dates or certifications that are not present in
   the source material. You may rephrase, reorder, and re-emphasise existing content, and you may
   surface skills implied by the candidate's projects.
-- Mirror the job description's vocabulary in the summary, skills and bullet points.
+- Mirror the job description's vocabulary in the summary, skills and bullet points. An ATS matches
+  on the exact term, so reuse the JD's wording rather than a synonym, and put the most important
+  requirements in the summary and the most recent role.
 - Every experience/project bullet starts with a strong verb and includes a metric where the source
   material provides one.
+- List any JD requirement you found no evidence for in `missing_keywords`. It must NOT appear
+  anywhere in the resume — claiming a qualification the candidate lacks costs them the interview.
 
 Respond ONLY with a single raw JSON object (no markdown, no backticks) in this exact shape:
 {
@@ -547,8 +564,11 @@ Respond ONLY with a single raw JSON object (no markdown, no backticks) in this e
     "education": [{"degree": "", "school": "", "start": "", "end": "", "detail": ""}],
     "certifications": [""]
   },
+  "matched_keywords": ["JD requirements the candidate genuinely evidences"],
+  "missing_keywords": ["JD requirements with no support in the source"],
   "added_keywords": [""],
   "removed_keywords": [""],
+  "gaps": ["up to 3 short honest notes on what would strengthen this application"],
   "ats_tips": [""],
   "project_suggestions": [{"title": "", "description": "", "why_selected": ""}]
 }
@@ -579,15 +599,15 @@ def _load_default_resume_text(variant: Optional[str], user_email: Optional[str])
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT variant, text_content FROM defaults WHERE user_email = ? AND variant IN ('genai', 'backend')",
-        (user_email,),
+        f"SELECT variant, text_content FROM defaults WHERE user_email = ? AND variant IN ({_slot_placeholders()})",
+        (user_email, *SLOT_VARIANTS),
     )
     rows = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
 
     if variant and rows.get(variant):
         return rows[variant], variant
-    for key in ("genai", "backend"):
+    for key in SLOT_VARIANTS:
         if rows.get(key):
             return rows[key], key
     return "", "none"
@@ -674,10 +694,31 @@ the same block ids, and every list the same length as the one you were given:
     ]}
   ],
   "match_score": 0-100,
-  "added_keywords": ["..."],
-  "removed_keywords": ["..."],
+  "matched_keywords": ["JD requirements the candidate genuinely evidences"],
+  "missing_keywords": ["JD requirements with no support in the source"],
+  "added_keywords": ["terms you worked into the text"],
+  "removed_keywords": ["terms you de-emphasised"],
+  "gaps": ["up to 3 short honest notes on what would strengthen this application"],
   "ats_tips": ["..."]
 }
+
+How to maximise the ATS match:
+1. First read the job description and list its hard requirements — named skills,
+   tools, platforms, certifications, domain and seniority.
+2. For each requirement, look for evidence in the candidate's blocks. Where it
+   exists, make sure the JD's own wording appears in the text — an ATS matches
+   on the exact term, so "management accounting" does not score for "managed
+   accounts". Put the most important ones in the summary and the most recent
+   role, where both parsers and humans look first.
+3. Where a `labeled` skills row exists, reorder it so JD-relevant items lead.
+4. Prefer the JD's vocabulary over synonyms throughout, and spell out an acronym
+   once alongside its expansion ("UAT (User Acceptance Testing)") so either form
+   matches.
+5. Requirements with no evidence go in `missing_keywords`. They must NOT appear
+   anywhere in the rewritten CV.
+
+`match_score` is your honest estimate of how this CV now scores against this JD.
+Use the full range: a CV aimed at a different domain scores below 40, not 60.
 
 Hard rules:
 - NEVER add, remove, reorder or merge sections, blocks or bullets. If a block has
@@ -704,7 +745,7 @@ actionable gaps the candidate should address."""
 class ResumeTailorRequest(BaseModel):
     job_description: str
     user_email: str
-    variant: Optional[str] = None  # 'genai' | 'backend' — which template to use
+    variant: Optional[str] = None  # 'main' | 'genai' | 'backend' — which template to use
 
 
 def _load_template(user_email: str, variant: Optional[str]) -> tuple[Optional[dict], str]:
@@ -712,14 +753,14 @@ def _load_template(user_email: str, variant: Optional[str]) -> tuple[Optional[di
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT variant, layout_json FROM templates WHERE user_email = ? AND variant IN ('genai', 'backend')",
-        (user_email,),
+        f"SELECT variant, layout_json FROM templates WHERE user_email = ? AND variant IN ({_slot_placeholders()})",
+        (user_email, *SLOT_VARIANTS),
     )
     rows = {row[0]: row[1] for row in cursor.fetchall()}
     conn.close()
 
     order = [variant] if variant else []
-    order += [v for v in ("genai", "backend") if v != variant]
+    order += [v for v in SLOT_VARIANTS if v != variant]
     for key in order:
         if rows.get(key):
             try:
@@ -737,6 +778,40 @@ async def get_template(user_email: str, variant: Optional[str] = None):
     if not layout:
         raise HTTPException(status_code=404, detail="No resume template for this account.")
     return {"layout": layout, "source": source}
+
+
+class TemplateUpdateRequest(BaseModel):
+    user_email: str
+    layout: dict
+    variant: Optional[str] = None
+
+
+@app.put("/api/template")
+async def update_template(req: TemplateUpdateRequest):
+    """
+    Save user edits to their base CV.
+
+    The incoming layout is merged into the stored one through `apply_rewrite`,
+    the same guard tailoring uses — so an edit can change wording but cannot
+    reorder sections, drop bullets or rewrite dates and employers. Those are
+    read off the source PDF and are what the whole layout guarantee rests on.
+    """
+    stored, source = _load_template(req.user_email, req.variant)
+    if not stored:
+        raise HTTPException(status_code=404, detail="No resume template for this account.")
+
+    merged, changes = apply_rewrite(stored, req.layout)
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "UPDATE templates SET layout_json = ?, derived_at = ? WHERE user_email = ? AND variant = ?",
+        (json.dumps(merged), datetime.now().isoformat(), req.user_email, source),
+    )
+    conn.commit()
+    conn.close()
+
+    return {"layout": merged, "changes": changes, "source": source}
 
 
 @app.get("/api/template-status")
@@ -791,8 +866,11 @@ async def resume_tailor(req: ResumeTailorRequest):
         "changes": changes,
         "resume_text": layout_to_text(merged),
         "match_score": parsed.get("match_score", 0),
+        "matched_keywords": parsed.get("matched_keywords", []) or [],
+        "missing_keywords": parsed.get("missing_keywords", []) or [],
         "added_keywords": parsed.get("added_keywords", []) or [],
         "removed_keywords": parsed.get("removed_keywords", []) or [],
+        "gaps": parsed.get("gaps", []) or [],
         "ats_tips": parsed.get("ats_tips", []) or [],
         "source": source,
     }
@@ -812,6 +890,68 @@ async def resume_tailor(req: ResumeTailorRequest):
         print(f"Database error: {db_err}")
 
     return result
+
+
+COVER_SYSTEM_PROMPT = """You write cover letters for a specific candidate and job.
+
+You are given the candidate's tailored CV content and the job description. Write
+a letter that reads like the candidate wrote it themselves.
+
+Rules:
+- 200-230 words, three short paragraphs, addressed "Dear Hiring Team,".
+- Paragraph 1: the role they're applying for and the single strongest reason
+  they fit. Paragraph 2: concrete evidence drawn from the CV — real employers,
+  real projects, real numbers. Paragraph 3: what draws them to this role, and a
+  brief close.
+- Use ONLY facts present in the CV content. Never invent an employer, a metric,
+  a qualification or an interest. If the CV doesn't support a JD requirement,
+  say nothing about it rather than implying it.
+- UK English. No flattery, no "I am writing to apply", no bullet points, no
+  placeholders like [Company]. If the company name is in the job description,
+  use it; otherwise write around it.
+- Output only the letter body, starting with "Dear Hiring Team,". Do not add a
+  signature block — the renderer appends it."""
+
+
+class CoverLetterRequest(BaseModel):
+    job_description: str
+    resume_text: str
+    candidate_name: Optional[str] = None
+
+
+@app.post("/api/resume-cover")
+async def resume_cover(req: CoverLetterRequest):
+    """Write a cover letter from the tailored CV, so the letter and the CV tell
+    the same story rather than being generated from different source material."""
+    if not req.job_description.strip():
+        raise HTTPException(status_code=400, detail="job_description is required.")
+    if not req.resume_text.strip():
+        raise HTTPException(status_code=400, detail="resume_text is required.")
+
+    user_message = f"""--- Candidate CV content ---
+{req.resume_text[:6000]}
+
+--- Target job description ---
+{req.job_description[:6000]}
+"""
+    client = _openai_client()
+    try:
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            max_tokens=900,
+            messages=[
+                {"role": "system", "content": COVER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_message},
+            ],
+        )
+        letter = (response.choices[0].message.content or "").strip()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Cover letter generation failed: {str(e)}")
+
+    if not letter:
+        raise HTTPException(status_code=502, detail="The model returned an empty cover letter.")
+
+    return {"cover_letter": letter}
 
 
 @app.get("/api/history")

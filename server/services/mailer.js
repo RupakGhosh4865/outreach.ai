@@ -86,13 +86,20 @@ export function senderIdentity(profile, fallbackEmail) {
  *
  * @returns {{ attachments: Array, body: string, attachmentStatus: 'optimized'|'profile'|'missing' }}
  */
-export function attachResume({ optimizedPdfPath, profile, body, jobTitle }) {
+export function attachResume({ optimizedPdfPath, coverPdfPath, profile, body, jobTitle }) {
+    const safeTitle = (jobTitle || 'Application').replace(/[^\w-]+/g, '_');
+    // Only ever accompanies a CV — a cover letter on its own would arrive as an
+    // orphan attachment referring to a resume that isn't there.
+    const cover = coverPdfPath && fs.existsSync(coverPdfPath)
+        ? [{ filename: `Cover_Letter_${safeTitle}.pdf`, path: coverPdfPath }]
+        : [];
+
     if (optimizedPdfPath && fs.existsSync(optimizedPdfPath)) {
         return {
-            attachments: [{
-                filename: `Resume_${(jobTitle || 'Application').replace(/[^\w-]+/g, '_')}.pdf`,
-                path: optimizedPdfPath,
-            }],
+            attachments: [
+                { filename: `Resume_${safeTitle}.pdf`, path: optimizedPdfPath },
+                ...cover,
+            ],
             body,
             attachmentStatus: 'optimized',
         };

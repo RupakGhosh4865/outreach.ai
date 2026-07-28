@@ -628,6 +628,7 @@ router.post('/send', async (req, res) => {
             scheduledAt,  // ISO datetime string — null / undefined = send immediately
             appliedBy,    // name of the person applying on the owner's behalf
             applyStartedAt, // ISO datetime the wizard was started, for the timer
+            attachCoverLetter, // opt-in: send the tailored cover letter too
         } = req.body;
 
         const userEmail = currentEmail(req);
@@ -656,6 +657,7 @@ router.post('/send', async (req, res) => {
 
         // ── Optimise Resume ────────────────────────────────────────────────────
         let optimizedPdfPath = null;
+        let coverPdfPath = null;
         let optimizedResumeUsed = null;
         let optimizedMatchScore = null;
         let optimizedAddedKeywords = [];
@@ -671,6 +673,9 @@ router.post('/send', async (req, res) => {
                 optimizedMatchScore = optimResult.matchScore;
                 optimizedAddedKeywords = optimResult.addedKeywords || [];
                 optimizedAtsTips = optimResult.atsTips || [];
+                // Opt-in: the cover letter is only attached when the user asked
+                // for it on the review step.
+                if (attachCoverLetter) coverPdfPath = optimResult.coverPdfPath;
             } else {
                 resumeError = optimResult.error;
             }
@@ -678,7 +683,7 @@ router.post('/send', async (req, res) => {
 
         // Never promise an attachment we don't have.
         const { attachments, body: outgoingBody, attachmentStatus } = attachResume({
-            optimizedPdfPath, profile, body, jobTitle,
+            optimizedPdfPath, coverPdfPath, profile, body, jobTitle,
         });
 
         // ── Scheduled Send ────────────────────────────────────────────────────
@@ -848,9 +853,14 @@ const publicOptimResult = (key, result) => ({
     matchScore: result.matchScore,
     addedKeywords: result.addedKeywords,
     removedKeywords: result.removedKeywords,
+    matchedKeywords: result.matchedKeywords,
+    missingKeywords: result.missingKeywords,
+    gaps: result.gaps,
     atsTips: result.atsTips,
     projectSuggestions: result.projectSuggestions,
     pdfUrl: `/api/jobs/optimize-resume/pdf?key=${key}`,
+    coverText: result.coverText,
+    coverUrl: result.coverPdfPath ? `/api/jobs/optimize-resume/cover?key=${key}` : null,
     // Present only on the layout-preserving path. Drives the live document
     // preview, which shows the rewrite happening inside the user's own CV.
     layout: result.layout,
@@ -880,6 +890,21 @@ router.get('/resume-template', async (req, res) => {
         // falls back to a plain progress card.
         const status = err?.response?.status === 404 ? 404 : 502;
         res.status(status).json({ message: 'No resume template available.' });
+    }
+});
+
+// PUT /api/jobs/resume-template — save user edits to the base CV
+router.put('/resume-template', async (req, res) => {
+    try {
+        const { data } = await axios.put(
+            `${process.env.RESUME_OPTIMIZER_URL || 'http://localhost:8002'}/api/template`,
+            { user_email: currentEmail(req), layout: req.body?.layout },
+            { timeout: 20000 },
+        );
+        res.json(data);
+    } catch (err) {
+        const status = err?.response?.status === 404 ? 404 : 502;
+        res.status(status).json({ message: err?.response?.data?.detail || 'Could not save the CV edits.' });
     }
 });
 
@@ -931,6 +956,17 @@ router.get('/optimize-resume/pdf', (req, res) => {
     }
     res.setHeader('Content-Disposition', 'inline; filename="Optimized_Resume.pdf"');
     res.sendFile(pdfPath);
+});
+
+// GET /api/jobs/optimize-resume/cover?key= — the tailored cover letter PDF
+router.get('/optimize-resume/cover', (req, res) => {
+    const entry = ownedEntry(req, req.query.key);
+    const coverPath = entry?.result?.coverPdfPath;
+    if (entry?.status !== 'done' || !coverPath || !fs.existsSync(coverPath)) {
+        return res.status(404).json({ message: 'Cover letter not available.' });
+    }
+    res.setHeader('Content-Disposition', 'inline; filename="Cover_Letter.pdf"');
+    res.sendFile(coverPath);
 });
 
 // POST /api/jobs/analyze-fit

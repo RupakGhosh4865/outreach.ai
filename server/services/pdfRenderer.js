@@ -188,7 +188,17 @@ async function pdfPageCount(filePath) {
     }
 }
 
-export async function renderLayoutPdf(layout, outPath) {
+/**
+ * @param {object} layout      the layout map supplying type sizes and margins
+ * @param {string} outPath     where to write the PDF
+ * @param {object} [opts]
+ * @param {string} [opts.bodyHtml] render this instead of the layout's sections
+ *                                 (used by the cover letter, which shares the
+ *                                 CV's styling but not its structure)
+ * @param {boolean} [opts.fitPages] tighten spacing to hit the original page
+ *                                  count; off for documents with no target
+ */
+export async function renderLayoutPdf(layout, outPath, { bodyHtml = null, fitPages = true } = {}) {
     const fonts = layout?.fonts || {};
     const pt = (v, fallback) => `${Number(v) > 0 ? Number(v) : fallback}pt`;
     const family = fonts.body?.family || '';
@@ -211,7 +221,7 @@ export async function renderLayoutPdf(layout, outPath) {
     };
 
     const template = fs.readFileSync(LAYOUT_TEMPLATE_PATH, 'utf-8');
-    const body = renderLayoutHtml(layout);
+    const body = bodyHtml || renderLayoutHtml(layout);
 
     // PDF points map 1:1 to CSS pt, so the sizes measured off the source PDF
     // carry over directly. They are injected as a stylesheet rather than an
@@ -228,7 +238,7 @@ export async function renderLayoutPdf(layout, outPath) {
         }`)
         .replace('<!--RESUME-->', body);
 
-    const target = Number(layout?.page_count) || null;
+    const target = fitPages ? (Number(layout?.page_count) || null) : null;
     // Tailored text runs a little longer than the original, which can push a
     // one-page CV onto a second page — the most visible way "same layout" fails.
     // Tighten leading and block spacing until it fits, rather than dropping
@@ -259,6 +269,115 @@ export async function renderLayoutPdf(layout, outPath) {
     const { size } = fs.statSync(outPath);
     if (size < 1000) throw new Error(`Rendered PDF looks empty (${size} bytes)`);
     return outPath;
+}
+
+/**
+ * Render a cover letter to PDF using the CV's own header and type.
+ *
+ * Built from the same layout map so the letter and the CV read as one set —
+ * same name treatment, same contact line, same font — rather than two documents
+ * that happen to be attached to the same email.
+ */
+export async function renderCoverPdf({ layout, text, outPath }) {
+    const header = layout?.header || {};
+    const contact = arr(header.contact_lines).concat(arr(header.extra_lines))
+        .map(cleanContactLine).filter(Boolean);
+
+    const date = new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
+    const body = String(text || '').trim();
+
+    // The prompt is told not to sign off, so the signature is added here where
+    // the candidate's real name is known.
+    const signed = new RegExp(`${esc(header.name || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i').test(body);
+
+    const paragraphs = body.split(/\n\s*\n/).map((p) => `<p>${esc(p).replace(/\n/g, '<br>')}</p>`).join('');
+
+    const inner = `
+    <header>
+      ${header.name ? `<h1>${esc(header.name)}</h1>` : ''}
+      ${contact.length ? `<div class="contact">${contact.map((c) => `<div>${linkifyContact(c)}</div>`).join('')}</div>` : ''}
+    </header>
+    <div class="letter">
+      <p class="letter-date">${esc(date)}</p>
+      ${paragraphs}
+      ${signed ? '' : `<p class="letter-sign">Yours sincerely,<br>${esc(header.name || '')}</p>`}
+    </div>`;
+
+    return renderLayoutPdf(layout, outPath, { bodyHtml: inner, fitPages: false });
+}
+
+/**
+ * Convert the optimizer's structured JSON resume into a layout map.
+ *
+ * This is the fallback path, used when no template could be derived from the
+ * user's own PDF (a scanned image, or an account that predates derivation).
+ * Rather than a second renderer with its own look, it adopts a fixed "studio"
+ * preset — serif, centred name, ruled section headings — and goes through
+ * `renderLayoutPdf` like everything else. The previous fallback produced a
+ * visibly different, much plainer document, which is what users noticed.
+ */
+export function resumeToLayout(resume) {
+    const r = resume || {};
+    let n = 0;
+    const id = (p) => `${p}${++n}`;
+
+    const section = (heading, blocks) => (blocks.length ? { id: id('s'), heading, blocks } : null);
+
+    const contact = [r.email, r.phone, r.location].filter(Boolean).join('  |  ');
+    const links = arr(r.links).filter((l) => l?.url).map((l) => l.label || l.url).join('  |  ');
+
+    const sections = [
+        r.summary && section('Summary', [{ type: 'paragraph', id: id('b'), text: r.summary }]),
+        section('Skills', arr(r.skills)
+            .filter((s) => arr(s.items).length)
+            .map((s) => ({ type: 'labeled', id: id('b'), label: `${s.category}:`, text: arr(s.items).join(', ') }))),
+        section('Experience', arr(r.experience).map((e) => ({
+            type: 'entry',
+            id: id('b'),
+            left: e.role || '',
+            right: [e.start, e.end].filter(Boolean).join(' - '),
+            sub: [e.company, e.location].filter(Boolean).join(', '),
+            bullets: arr(e.bullets).filter(Boolean),
+        }))),
+        section('Projects', arr(r.projects).map((p) => ({
+            type: 'entry',
+            id: id('b'),
+            left: p.name || '',
+            right: '',
+            sub: p.tech || '',
+            bullets: arr(p.bullets).filter(Boolean),
+        }))),
+        section('Education', arr(r.education).map((e) => ({
+            type: 'entry',
+            id: id('b'),
+            left: e.degree || '',
+            right: [e.start, e.end].filter(Boolean).join(' - '),
+            sub: e.school || '',
+            bullets: e.detail ? [e.detail] : [],
+        }))),
+        section('Certifications', arr(r.certifications).filter(Boolean).length
+            ? [{ type: 'bullets', id: id('b'), items: arr(r.certifications).filter(Boolean) }]
+            : []),
+    ].filter(Boolean);
+
+    return {
+        page_size: [595, 842],
+        page_count: 0, // unknown — skips the density fitting, which needs a target
+        margins: { left: 40, right: 40 },
+        fonts: {
+            body: { family: 'Palatino', size: 10 },
+            name: { size: 19 },
+            heading: { size: 11.5 },
+        },
+        header: {
+            name: r.name || '',
+            title: r.title || '',
+            contact_lines: [contact, links].filter(Boolean),
+            extra_lines: [],
+            align: 'center',
+        },
+        sections,
+    };
 }
 
 /** Plain-text version of a layout map, used to enrich the email prompt. */

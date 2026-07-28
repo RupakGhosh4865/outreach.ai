@@ -68,10 +68,14 @@ async function stepGenerateCv(app, profile) {
         patch: {
             cv: {
                 pdfPath: result.pdfPath,
+                coverPdfPath: result.coverPdfPath,
+                coverText: result.coverText,
                 content: result.resume,
                 matchScore: result.matchScore,
                 atsTips: result.atsTips,
                 addedKeywords: result.addedKeywords,
+                matchedKeywords: result.matchedKeywords,
+                missingKeywords: result.missingKeywords,
                 error: undefined,
             },
         },
@@ -175,6 +179,7 @@ async function stepSendEmail(app, profile) {
 
         const { attachments, body, attachmentStatus } = attachResume({
             optimizedPdfPath: app.cv?.pdfPath,
+            coverPdfPath: app.cv?.coverPdfPath,
             profile,
             body: app.email?.body,
             jobTitle: app.jobTitle,
