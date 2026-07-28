@@ -2,9 +2,9 @@
 
 import { useState } from 'react';
 import {
-    AlertTriangle, CheckCircle2, Download, Eye, Lightbulb, Minus, Plus,
+    AlertTriangle, CheckCircle2, Download, Eye, FileSignature, Lightbulb, Minus, Plus,
 } from 'lucide-react';
-import { Alert, Badge, Button, Card, cn } from './ui';
+import { Alert, Button, Card, cn } from './ui';
 import ResumePreview from './ResumePreview';
 import { downloadAuthedFile, openAuthedFile } from '@/lib/api';
 
@@ -13,14 +13,15 @@ import { downloadAuthedFile, openAuthedFile } from '@/lib/api';
 const SLOT_LABELS = { genai: 'Resume 1', backend: 'Resume 2' };
 
 /** Small pill for an added/removed keyword. */
+const CHIP_TONES = {
+    add: 'bg-success/12 text-success',
+    warn: 'bg-warning/12 text-warning',
+    remove: 'bg-danger/12 text-danger',
+};
+
 function Chip({ tone, children }) {
     return (
-        <span
-            className={cn(
-                'inline-block rounded-full px-2.5 py-1 text-xs font-semibold',
-                tone === 'add' ? 'bg-success/12 text-success' : 'bg-danger/12 text-danger',
-            )}
-        >
+        <span className={cn('inline-block rounded-full px-2.5 py-1 text-xs font-semibold', CHIP_TONES[tone] || CHIP_TONES.remove)}>
             {children}
         </span>
     );
@@ -46,27 +47,34 @@ function ProgressRing({ percent }) {
     );
 }
 
-function ScoreCard({ label, score, selected }) {
-    const tone = score > 75 ? 'text-success' : score > 50 ? 'text-warning' : 'text-danger';
+/** The finished ATS match, coloured by how strong it is. */
+function ScoreRing({ score }) {
+    const value = Math.max(0, Math.min(100, Math.round(Number(score) || 0)));
+    const colour = value >= 75 ? 'var(--color-success)' : value >= 50 ? 'var(--color-warning)' : 'var(--color-danger)';
+    const text = value >= 75 ? 'text-success' : value >= 50 ? 'text-warning' : 'text-danger';
     return (
         <div
-            className={cn(
-                'rounded-xl border p-3 transition-colors',
-                selected ? 'border-success/50 bg-success/6' : 'border-white/8 bg-white/2',
-            )}
+            className="relative grid size-16 place-items-center rounded-full"
+            style={{ background: `conic-gradient(${colour} ${value * 3.6}deg, rgba(255,255,255,0.09) 0deg)` }}
+            role="img"
+            aria-label={`ATS match ${value} percent`}
         >
-            <div className="mb-1 flex items-center justify-between gap-2">
-                <span className="text-[0.7rem] font-semibold uppercase tracking-wide text-subtle">{label}</span>
-                {selected && <Badge tone="success">Selected</Badge>}
+            <div className="grid size-13 place-items-center rounded-full bg-bg">
+                <span className={cn('text-base font-extrabold', text)} data-numeric>{value}%</span>
             </div>
-            <p className={cn('text-xl font-extrabold', tone)} data-numeric>{score ?? 0}%</p>
         </div>
     );
 }
 
-export default function ResumeOptimizerPanel({ optimizeState, compact = false }) {
+export default function ResumeOptimizerPanel({
+    optimizeState,
+    compact = false,
+    attachCover = false,
+    onAttachCoverChange = null,
+}) {
     const [busy, setBusy] = useState('');
     const [fileError, setFileError] = useState('');
+    const [expanded, setExpanded] = useState(false);
 
     const withFile = (kind, fn) => async () => {
         setBusy(kind);
@@ -125,6 +133,8 @@ export default function ResumeOptimizerPanel({ optimizeState, compact = false })
 
     const download = withFile('download', () => downloadAuthedFile(pdfPath, 'Optimized_Resume.pdf'));
 
+    const downloadCover = withFile('cover', () => downloadAuthedFile(result.coverUrl, 'Cover_Letter.pdf'));
+
     return (
         <Card className="mb-4 border-success/25 bg-success/4">
             <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
@@ -150,32 +160,78 @@ export default function ResumeOptimizerPanel({ optimizeState, compact = false })
                 into the user's own document. */}
             {result.layout && (
                 <div className="mb-4">
-                    <ResumePreview layout={result.layout} changes={result.changes} />
-                    {result.changes?.length > 0 && (
-                        <p className="mt-2 text-xs text-subtle">
-                            <span className="font-semibold text-text" data-numeric>{result.changes.length}</span>{' '}
-                            line(s) rewritten · layout, dates and employers unchanged
-                        </p>
-                    )}
+                    <ResumePreview layout={result.layout} changes={result.changes} expanded={expanded} />
+                    <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                        {result.changes?.length > 0 ? (
+                            <p className="text-xs text-subtle">
+                                <span className="font-semibold text-text" data-numeric>{result.changes.length}</span>{' '}
+                                line(s) rewritten · layout, dates and employers unchanged
+                            </p>
+                        ) : <span />}
+                        <button
+                            type="button"
+                            onClick={() => setExpanded((e) => !e)}
+                            aria-expanded={expanded}
+                            className="tap rounded text-xs font-semibold text-brand"
+                        >
+                            {expanded ? 'Collapse' : 'View full document'}
+                        </button>
+                    </div>
                 </div>
             )}
 
-            {/* The layout-preserving path tailors one resume and returns a
-                single score; the legacy path scores both and picks a winner. */}
-            {result.layout ? (
-                <div className="mb-4">
-                    <ScoreCard
-                        label={`ATS match${SLOT_LABELS[winner] ? ` · ${SLOT_LABELS[winner]}` : ''}`}
-                        score={result.matchScore}
-                        selected
-                    />
+            {/* One score for one tailored CV. This previously rendered two cards
+                bound to `genaiScore`/`backendScore`, which no endpoint has ever
+                returned — so both always read 0%. */}
+            <div className={cn('mb-4 flex gap-4', compact && 'flex-col')}>
+                <div className="flex shrink-0 flex-col items-center gap-1">
+                    <ScoreRing score={result.matchScore} />
+                    <span className="text-[0.65rem] font-semibold uppercase tracking-wide text-subtle">
+                        ATS match
+                    </span>
+                    {SLOT_LABELS[winner] && (
+                        <span className="text-[0.65rem] text-subtle">{SLOT_LABELS[winner]}</span>
+                    )}
                 </div>
-            ) : (
-                <div className={cn('mb-4 grid gap-3', compact ? 'grid-cols-1' : 'grid-cols-2')}>
-                    <ScoreCard label="Resume 1" score={result.genaiScore} selected={winner === 'genai'} />
-                    <ScoreCard label="Resume 2" score={result.backendScore} selected={winner === 'backend'} />
+
+                <div className="min-w-0 flex-1 space-y-3">
+                    {result.matchedKeywords?.length > 0 && (
+                        <div>
+                            <p className="mb-1.5 text-[0.65rem] font-bold uppercase tracking-wide text-subtle">
+                                Strengths
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                                {result.matchedKeywords.slice(0, 10).map((k, i) => <Chip key={i} tone="add">{k}</Chip>)}
+                            </div>
+                        </div>
+                    )}
+
+                    {result.missingKeywords?.length > 0 && (
+                        <div>
+                            <p className="mb-1.5 text-[0.65rem] font-bold uppercase tracking-wide text-subtle">
+                                Missing / to address
+                            </p>
+                            <div className="flex flex-wrap gap-1.5">
+                                {result.missingKeywords.slice(0, 8).map((k, i) => <Chip key={i} tone="warn">{k}</Chip>)}
+                            </div>
+                            <p className="mt-1.5 text-xs text-subtle">
+                                Deliberately left out of the CV — claiming these would not survive an interview.
+                            </p>
+                        </div>
+                    )}
+
+                    {result.gaps?.length > 0 && (
+                        <ul className="space-y-1">
+                            {result.gaps.slice(0, 3).map((g, i) => (
+                                <li key={i} className="flex gap-2 text-sm text-muted">
+                                    <span className="mt-2 size-1 shrink-0 rounded-full bg-subtle" aria-hidden="true" />
+                                    {g}
+                                </li>
+                            ))}
+                        </ul>
+                    )}
                 </div>
-            )}
+            </div>
 
             {result.addedKeywords?.length > 0 && (
                 <div className="mb-3">
@@ -198,6 +254,45 @@ export default function ResumeOptimizerPanel({ optimizeState, compact = false })
                     <div className="flex flex-wrap gap-1.5">
                         {result.removedKeywords.map((k, i) => <Chip key={i} tone="remove">{k}</Chip>)}
                     </div>
+                </div>
+            )}
+
+            {result.coverText && (
+                <div className="mb-4 rounded-xl border border-white/8 bg-white/2 p-4">
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                        <p className="flex items-center gap-1.5 text-xs font-bold uppercase tracking-wide text-subtle">
+                            <FileSignature className="size-3.5" aria-hidden="true" />
+                            Cover letter
+                        </p>
+                        <div className="flex items-center gap-2">
+                            {result.coverUrl && (
+                                <Button
+                                    type="button"
+                                    variant="secondary"
+                                    size="sm"
+                                    loading={busy === 'cover'}
+                                    onClick={downloadCover}
+                                >
+                                    {busy !== 'cover' && <Download className="size-3.5" aria-hidden="true" />}
+                                    PDF
+                                </Button>
+                            )}
+                            {onAttachCoverChange && (
+                                <label className="flex cursor-pointer items-center gap-2 text-sm text-muted">
+                                    <input
+                                        type="checkbox"
+                                        checked={attachCover}
+                                        onChange={(e) => onAttachCoverChange(e.target.checked)}
+                                        className="size-4 accent-brand"
+                                    />
+                                    Attach to email
+                                </label>
+                            )}
+                        </div>
+                    </div>
+                    <p className="max-h-56 overflow-y-auto whitespace-pre-wrap rounded-lg bg-black/20 p-3 text-sm leading-relaxed text-muted">
+                        {result.coverText}
+                    </p>
                 </div>
             )}
 

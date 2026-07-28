@@ -155,18 +155,35 @@ router.post('/', uploadFields, async (req, res) => {
         else { profile = await UserProfile.create(updateData); }
 
         // ── Forward optimizer resumes to Python FastAPI (non-fatal)
-        const srcGenai   = genaiFile   || (profile.resumeGenaiPath   && fs.existsSync(profile.resumeGenaiPath)   ? { path: profile.resumeGenaiPath,   originalname: profile.resumeGenaiName   } : null);
-        const srcBackend = backendFile  || (profile.resumeBackendPath && fs.existsSync(profile.resumeBackendPath) ? { path: profile.resumeBackendPath,  originalname: profile.resumeBackendName } : null);
+        //
+        // The main resume is included: it is the slot every user fills in, and
+        // excluding it meant an account with only a main resume had no layout
+        // template, so every tailor request 404'd into the generic builder.
+        const resolveSrc = (uploaded, pathField, nameField) =>
+            uploaded || (profile[pathField] && fs.existsSync(profile[pathField])
+                ? { path: profile[pathField], originalname: profile[nameField] }
+                : null);
+
+        const sources = {
+            resume_main:    resolveSrc(mainFile,    'resumePath',        'resumeOriginalName'),
+            resume_genai:   resolveSrc(genaiFile,   'resumeGenaiPath',   'resumeGenaiName'),
+            resume_backend: resolveSrc(backendFile, 'resumeBackendPath', 'resumeBackendName'),
+        };
 
         let optimizerSyncError = null;
-        if (srcGenai || srcBackend) {
+        if (Object.values(sources).some(Boolean)) {
             try {
                 const fd = new FormData();
                 // Scopes these defaults to one account in the optimizer's store.
                 fd.append('user_email', profile.email);
-                if (srcGenai)   fd.append('resume_genai',   fs.createReadStream(srcGenai.path),   { filename: forwardNameFor(srcGenai),   contentType: contentTypeFor(srcGenai) });
-                if (srcBackend) fd.append('resume_backend',  fs.createReadStream(srcBackend.path),  { filename: forwardNameFor(srcBackend),  contentType: contentTypeFor(srcBackend) });
-                await axios.post(`${RESUME_OPTIMIZER_URL}/api/save-defaults`, fd, { headers: fd.getHeaders(), timeout: 20000 });
+                for (const [field, src] of Object.entries(sources)) {
+                    if (!src) continue;
+                    fd.append(field, fs.createReadStream(src.path), {
+                        filename: forwardNameFor(src),
+                        contentType: contentTypeFor(src),
+                    });
+                }
+                await axios.post(`${RESUME_OPTIMIZER_URL}/api/save-defaults`, fd, { headers: fd.getHeaders(), timeout: 30000 });
                 console.log(`[Profile] Optimizer resumes synced for ${email}`);
             } catch (optErr) {
                 optimizerSyncError = optErr.response?.data?.detail
@@ -198,7 +215,7 @@ router.post('/', uploadFields, async (req, res) => {
 // for the slot, which stays 'genai'/'backend' on the Python side even though
 // the UI now calls them Resume 1 and Resume 2.
 const RESUME_SLOTS = {
-    main:    { pathField: 'resumePath',        nameField: 'resumeOriginalName', variant: null },
+    main:    { pathField: 'resumePath',        nameField: 'resumeOriginalName', variant: 'main' },
     genai:   { pathField: 'resumeGenaiPath',   nameField: 'resumeGenaiName',    variant: 'genai' },
     backend: { pathField: 'resumeBackendPath', nameField: 'resumeBackendName',  variant: 'backend' },
 };

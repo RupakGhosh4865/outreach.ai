@@ -70,6 +70,7 @@ export async function apiFetch(path, { method = 'GET', body, headers = {}, ...re
 
 export const apiGet = (path, options) => apiFetch(path, { ...options, method: 'GET' });
 export const apiPost = (path, body, options) => apiFetch(path, { ...options, method: 'POST', body });
+export const apiPut = (path, body, options) => apiFetch(path, { ...options, method: 'PUT', body });
 export const apiDelete = (path, options) => apiFetch(path, { ...options, method: 'DELETE' });
 
 /** Absolute URL for endpoints that don't require auth (OAuth entry points). */

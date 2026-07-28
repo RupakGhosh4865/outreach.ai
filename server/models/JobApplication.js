@@ -58,10 +58,14 @@ const jobApplicationSchema = new mongoose.Schema({
 
     cv: {
         pdfPath: String,
+        coverPdfPath: String,
+        coverText: String,
         content: mongoose.Schema.Types.Mixed, // structured JSON resume
         matchScore: Number,
         atsTips: [String],
         addedKeywords: [String],
+        matchedKeywords: [String],
+        missingKeywords: [String],
         error: String,
     },
 
