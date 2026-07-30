@@ -186,6 +186,7 @@ async function fireScheduledJob(jobRecord) {
             profile,
             body: jobRecord.generatedEmailBody,
             jobTitle: jobRecord.jobTitle,
+            companyName: jobRecord.companyName,
         });
 
         const { sentTo } = await sendToRecipients({
@@ -683,7 +684,7 @@ router.post('/send', async (req, res) => {
 
         // Never promise an attachment we don't have.
         const { attachments, body: outgoingBody, attachmentStatus } = attachResume({
-            optimizedPdfPath, coverPdfPath, profile, body, jobTitle,
+            optimizedPdfPath, coverPdfPath, profile, body, jobTitle, companyName,
         });
 
         // ── Scheduled Send ────────────────────────────────────────────────────
@@ -848,7 +849,9 @@ router.get('/history', async (req, res) => {
 
 // ── Async resume optimization (UI-facing) ───────────────────────────────────
 
-const publicOptimResult = (key, result) => ({
+const publicOptimResult = (key, result, entry = {}) => ({
+    fileName: entry.fileName || 'Optimized_Resume.pdf',
+    coverFileName: entry.coverFileName || 'Cover_Letter.pdf',
     selectedResume: result.source,
     matchScore: result.matchScore,
     addedKeywords: result.addedKeywords,
@@ -910,17 +913,19 @@ router.put('/resume-template', async (req, res) => {
 
 // POST /api/jobs/optimize-resume — kick off (or reuse) optimization for a JD
 router.post('/optimize-resume', async (req, res) => {
-    const { jobDescription } = req.body;
+    const { jobDescription, companyName, jobTitle } = req.body;
     if (!jobDescription?.trim()) return res.status(400).json({ message: 'jobDescription is required.' });
 
     const profile = await UserProfile.findOne({ email: currentEmail(req) });
     const key = optimKey(jobDescription, profile?.email);
     const entry = getCacheEntry(key);
     if (entry?.status === 'done' && entry.result) {
-        return res.json({ key, status: 'done', result: publicOptimResult(key, entry.result) });
+        return res.json({ key, status: 'done', result: publicOptimResult(key, entry.result, entry) });
     }
     if (!entry || entry.status === 'failed') {
-        getOptimizedResumeForJob(jobDescription, profile); // resolves into the cache
+        // Company and role are carried only so the generated files can be named
+        // after them.
+        getOptimizedResumeForJob(jobDescription, profile, { companyName, jobTitle }); // resolves into the cache
     }
     res.status(202).json({ key, status: 'pending' });
 });
@@ -935,7 +940,7 @@ router.get('/optimize-resume/status', (req, res) => {
             percent: 100,
             stage: 'done',
             stageLabel: 'Ready',
-            result: publicOptimResult(req.query.key, entry.result),
+            result: publicOptimResult(req.query.key, entry.result, entry),
         });
     }
     res.json({

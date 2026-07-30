@@ -183,6 +183,7 @@ async function stepSendEmail(app, profile) {
             profile,
             body: app.email?.body,
             jobTitle: app.jobTitle,
+            companyName: app.companyName,
         });
 
         const { sentTo, errors } = await sendToRecipients({

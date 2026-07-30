@@ -41,6 +41,12 @@ CONTACT_RE = re.compile(r"[@]|\+\d|linkedin|github|https?://|portfolio|\|\s*\d")
 # Rows are one visual line when their baselines differ by less than this.
 ROW_TOLERANCE = 3.5
 
+# Longest a row can be and still be a section heading. This was 40, which
+# rejected "Certifications & Professional Development" (41 chars) — the heading
+# was absorbed into the skills row above it and the section vanished. Size and
+# left-margin position are the real signals; this only rules out prose.
+HEADING_MAX_CHARS = 60
+
 
 def _lines(page, page_index: int) -> list[dict]:
     """Flatten a page into styled text runs."""
@@ -149,7 +155,7 @@ def _pick_heading_size(rows: list[dict], body_size: float, name_size: float, lef
         if row["right"] or row["x0"] > left_margin + 6:
             continue
         text = row["text"].strip()
-        if not text or len(text) > 40 or BULLET_RE.match(text) or DATEISH_RE.search(text):
+        if not text or len(text) > HEADING_MAX_CHARS or BULLET_RE.match(text) or DATEISH_RE.search(text):
             continue
         candidates[row["size"]] = candidates.get(row["size"], 0) + 1
 
@@ -205,7 +211,7 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
         if row["right"] or row["x0"] > left_margin + 6:
             return False
         text = row["text"].strip()
-        return bool(text) and len(text) <= 40 and not BULLET_RE.match(text)
+        return bool(text) and len(text) <= HEADING_MAX_CHARS and not BULLET_RE.match(text)
 
     # ── Header: everything above the first section heading ──
     first = next((i for i, r in enumerate(rows) if is_heading(r)), len(rows))
@@ -255,6 +261,7 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
     section: Optional[dict] = None
     entry: Optional[dict] = None
     last_bullet: Optional[dict] = None  # (container list, index) of the bullet still being wrapped
+    last_labeled: Optional[tuple] = None  # (block, value column x) of a labelled row that may wrap
     bullet_indent: Optional[float] = None
 
     def ensure_section():
@@ -272,6 +279,7 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
             layout["sections"].append(section)
             entry = None
             last_bullet = None
+            last_labeled = None
             continue
 
         if not text and not row["right"]:
@@ -315,11 +323,25 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
         if row["label"] and not row["right"]:
             entry = None
             last_bullet = None
-            section["blocks"].append({
+            block = {
                 "type": "labeled", "id": next_id("b"),
                 "label": row["label"], "text": text,
-            })
+            }
+            section["blocks"].append(block)
+            # Remember where the value column starts so wrapped lines can be
+            # recognised and folded back in below.
+            last_labeled = (block, row["x0"])
             continue
+
+        # ── Wrapped continuation of a labelled row ──
+        # A long skills list wraps under its value column with no label of its
+        # own. Left as a paragraph it becomes an orphan line adrift from the
+        # category it belongs to.
+        if last_labeled and not row["right"] and not row["label"] and not row["bold"]:
+            block, value_x0 = last_labeled
+            if row["x0"] >= value_x0 - 2:
+                block["text"] = f"{block['text']} {text}".strip()
+                continue
 
         # ── Entry header: a titled row with a date range on the right ──
         if row["right"]:
@@ -378,15 +400,77 @@ def editable_view(layout: dict) -> dict:
             elif block["type"] == "bullets":
                 blocks.append({"id": block["id"], "type": "bullets", "items": list(block["items"])})
             elif block["type"] == "entry" and block["bullets"]:
-                blocks.append({
+                title, _, employer = split_title(block["left"])
+                entry = {
                     "id": block["id"], "type": "entry",
-                    # Read-only context so bullets can be aimed at the right role.
-                    "role_context": block["left"],
                     "bullets": list(block["bullets"]),
-                })
+                }
+                if employer:
+                    # Only the title is offered for rewriting; the employer is
+                    # sent as context so the model knows where the work happened
+                    # but has no way to alter it.
+                    entry["left"] = title
+                    entry["employer_context"] = employer
+                else:
+                    entry["role_context"] = block["left"]
+                blocks.append(entry)
         if blocks:
             sections.append({"id": sec["id"], "heading": sec.get("heading", ""), "blocks": blocks})
     return {"sections": sections}
+
+
+# Separators CVs use between a job title and its employer, most specific first.
+TITLE_SEPARATORS = (" | ", " · ", ", ", " @ ", " – ", " - ")
+
+
+def split_title(left: str) -> tuple[str, str, str]:
+    """
+    Split an entry heading into (title, separator, employer).
+
+    "Lead Business Analyst, Barclays PLC" -> ("Lead Business Analyst", ", ", "Barclays PLC")
+
+    Returns ("", "", "") when the two can't be told apart — a project name like
+    "RESEARCH.IO [Live]" has no employer to protect, so the whole string stays
+    locked rather than being guessed at.
+    """
+    for sep in TITLE_SEPARATORS:
+        if sep in left:
+            title, employer = left.rsplit(sep, 1)
+            if title.strip() and employer.strip():
+                return title.strip(), sep, employer.strip()
+    return "", "", ""
+
+
+def _retitle(block: dict, incoming) -> Optional[str]:
+    """
+    The new entry heading to accept, or None to keep the original.
+
+    Job titles are re-expressed in the target role's language, which the account
+    owner has asked for. The employer is not theirs to change, so it is carried
+    over from the original rather than taken from the model: whatever the model
+    returns, the company on the CV stays the company they worked for.
+    """
+    if not isinstance(incoming, str) or not incoming.strip():
+        return None
+
+    original = block.get("left", "")
+    new = " ".join(incoming.split())
+    if new == original:
+        return None
+
+    _, sep, employer = split_title(original)
+    if not employer:
+        # Employer and title are indistinguishable (a project name, say) — the
+        # safe move is to leave it alone.
+        return None
+
+    new_title, _, _ = split_title(new)
+    new_title = (new_title or new).strip()
+    if not new_title:
+        return None
+
+    rebuilt = f"{new_title}{sep}{employer}"
+    return rebuilt if rebuilt != original else None
 
 
 def apply_rewrite(layout: dict, rewrite: dict) -> tuple[dict, list[dict]]:
@@ -429,6 +513,15 @@ def apply_rewrite(layout: dict, rewrite: dict) -> tuple[dict, list[dict]]:
                     block["text"] = text
 
             elif block["type"] in ("bullets", "entry"):
+                if block["type"] == "entry":
+                    retitled = _retitle(block, new.get("left"))
+                    if retitled:
+                        changes.append({
+                            "block_id": block["id"], "field": "left",
+                            "before": block["left"], "after": retitled,
+                        })
+                        block["left"] = retitled
+
                 key = "items" if block["type"] == "bullets" else "bullets"
                 originals = block[key]
                 incoming = new.get(key)

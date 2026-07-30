@@ -3,6 +3,7 @@ import fs from 'fs';
 import nodemailer from 'nodemailer';
 import UserProfile from '../models/UserProfile.js';
 import { stripAttachmentClaim } from './emailComposer.js';
+import { documentFileName } from './resume.js';
 
 /**
  * Load a profile for sending.
@@ -86,18 +87,23 @@ export function senderIdentity(profile, fallbackEmail) {
  *
  * @returns {{ attachments: Array, body: string, attachmentStatus: 'optimized'|'profile'|'missing' }}
  */
-export function attachResume({ optimizedPdfPath, coverPdfPath, profile, body, jobTitle }) {
-    const safeTitle = (jobTitle || 'Application').replace(/[^\w-]+/g, '_');
+export function attachResume({ optimizedPdfPath, coverPdfPath, profile, body, jobTitle, companyName }) {
+    // The recruiter sees the filename before they open anything, so it carries
+    // the candidate and the role rather than "Resume_Application.pdf".
+    const name = (suffix) => documentFileName({
+        candidateName: profile?.name, companyName, jobTitle, suffix,
+    });
+
     // Only ever accompanies a CV — a cover letter on its own would arrive as an
     // orphan attachment referring to a resume that isn't there.
     const cover = coverPdfPath && fs.existsSync(coverPdfPath)
-        ? [{ filename: `Cover_Letter_${safeTitle}.pdf`, path: coverPdfPath }]
+        ? [{ filename: name('Cover Letter'), path: coverPdfPath }]
         : [];
 
     if (optimizedPdfPath && fs.existsSync(optimizedPdfPath)) {
         return {
             attachments: [
-                { filename: `Resume_${safeTitle}.pdf`, path: optimizedPdfPath },
+                { filename: name(''), path: optimizedPdfPath },
                 ...cover,
             ],
             body,

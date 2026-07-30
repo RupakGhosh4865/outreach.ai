@@ -325,7 +325,11 @@ export default function OutreachPage() {
             .catch(() => null);
 
         try {
-            const data = await apiPost('/api/jobs/optimize-resume', { jobDescription: jd });
+            // Company and role only name the generated files; they don't change
+            // the CV, so they're safe to send even when still being edited.
+            const data = await apiPost('/api/jobs/optimize-resume', {
+                jobDescription: jd, companyName, jobTitle,
+            });
             const template = await templatePromise;
 
             if (data.status === 'done') {

@@ -29,16 +29,54 @@ test('attachResume prefers the freshly optimized PDF', () => {
     try {
         const result = attachResume({
             optimizedPdfPath: optimized,
-            profile: { resumePath: profileResume, resumeOriginalName: 'Mine.pdf' },
+            profile: { name: 'Nikita Sah', resumePath: profileResume, resumeOriginalName: 'Mine.pdf' },
             body: 'My resume is attached.',
             jobTitle: 'Backend Engineer',
+            companyName: 'Barclays PLC',
         });
         assert.equal(result.attachmentStatus, 'optimized');
         assert.equal(result.attachments[0].path, optimized);
-        assert.equal(result.attachments[0].filename, 'Resume_Backend_Engineer.pdf');
+        // Recruiters see the filename before they open anything, so it names
+        // the candidate and the application rather than "Resume_...".
+        assert.equal(result.attachments[0].filename, 'Nikita_Sah_Barclays_PLC_Backend_Engineer.pdf');
         assert.equal(result.body, 'My resume is attached.', 'body is untouched when an attachment exists');
     } finally {
         fs.unlinkSync(optimized); fs.unlinkSync(profileResume);
+    }
+});
+
+test('attachResume names the cover letter to match the CV', () => {
+    const optimized = tmpFile('opt.pdf');
+    const cover = tmpFile('cover.pdf');
+    try {
+        const { attachments } = attachResume({
+            optimizedPdfPath: optimized,
+            coverPdfPath: cover,
+            profile: { name: 'Nikita Sah' },
+            body: 'Attached.',
+            jobTitle: 'Business Analyst',
+            companyName: 'Mears',
+        });
+        assert.equal(attachments.length, 2);
+        assert.equal(attachments[0].filename, 'Nikita_Sah_Mears_Business_Analyst.pdf');
+        assert.equal(attachments[1].filename, 'Nikita_Sah_Mears_Business_Analyst_Cover_Letter.pdf');
+    } finally {
+        fs.unlinkSync(optimized); fs.unlinkSync(cover);
+    }
+});
+
+test('attachResume drops missing name parts instead of leaving separators', () => {
+    const optimized = tmpFile('opt.pdf');
+    try {
+        const { attachments } = attachResume({
+            optimizedPdfPath: optimized,
+            profile: {},
+            body: 'Attached.',
+            jobTitle: 'Backend Engineer',
+        });
+        assert.equal(attachments[0].filename, 'Backend_Engineer.pdf');
+    } finally {
+        fs.unlinkSync(optimized);
     }
 });
 
