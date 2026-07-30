@@ -727,9 +727,15 @@ What to rewrite, block by block:
 - The summary/profile paragraph: rewrite it from scratch as a positioning
   statement for THIS role. It should read as though written for this advert —
   same person and same career, new argument for why they fit.
-- Every experience bullet: a new sentence. Keep the real achievement, the real
-  scope and any real number, but lead with the capability this job is buying
-  and use its language for it.
+- Every experience bullet: rebuild it, do not edit it. Work through them one at
+  a time and, for each, pick the job requirement it best evidences and write the
+  sentence to prove that requirement. Open with the requirement's own verb and
+  noun, then the real scope, then the outcome or number if the source has one.
+  The underlying fact stays true; the sentence that carries it is new.
+  A useful check: if your bullet still shares its opening clause with the
+  original, you have edited rather than rebuilt it — write it again.
+  Cover the requirements across the bullets rather than repeating the same one;
+  the most senior role carries the requirements the advert leads with.
 - `left` on an entry is the JOB TITLE ONLY. Return the title re-expressed in the
   target role's language where the work genuinely supports it — a business
   analyst who ran technology change can be "Technology Business Analyst", but

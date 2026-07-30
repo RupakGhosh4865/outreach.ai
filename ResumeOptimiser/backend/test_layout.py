@@ -157,6 +157,37 @@ def test_rewrite_does_not_mutate_the_stored_layout():
     assert layout == snapshot
 
 
+def test_month_names_are_not_matched_inside_words():
+    # "Mar" inside "Summary" and "Jun" inside "Junior" made those headings look
+    # like dates, so the section was skipped and its content swallowed by the
+    # one above it.
+    from layout import DATEISH_RE
+    for word in ("Summary", "Junior Developer", "Marketing", "Sepsis", "Augmented"):
+        assert not DATEISH_RE.search(word), f"{word} should not read as a date"
+    for date in ("Mar 2023", "Dec'25 - Present", "2021 - 2025", "June, 2024"):
+        assert DATEISH_RE.search(date), f"{date} should read as a date"
+
+
+def test_heading_style_falls_back_to_weight_then_case():
+    # Typeset CVs size their headings up; Word CVs very often just embolden or
+    # capitalise at body size. All three have to be readable or the resume
+    # collapses into a single section.
+    from layout import _pick_heading_style
+
+    def row(text, size, bold=False, x0=60.0):
+        return {"text": text, "size": size, "bold": bold, "x0": x0,
+                "right": "", "label": "", "y": 0.0, "page": 0}
+
+    larger = [row("Experience", 13), row("Education", 13), row("Body text here", 11)]
+    assert _pick_heading_style(larger, 11, 20, 60.0) == {"size": 13, "bold": None, "upper": False}
+
+    bolded = [row("Experience", 11, bold=True), row("Education", 11, bold=True), row("Body text", 11)]
+    assert _pick_heading_style(bolded, 11, 20, 60.0) == {"size": 11, "bold": True, "upper": False}
+
+    capped = [row("EXPERIENCE", 11), row("EDUCATION", 11), row("Body text", 11)]
+    assert _pick_heading_style(capped, 11, 20, 60.0) == {"size": 11, "bold": None, "upper": True}
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
