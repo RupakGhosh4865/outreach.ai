@@ -76,7 +76,15 @@ export async function parseResume(resumePath) {
  * have been downloaded. Empty parts are dropped rather than leaving separators.
  */
 export function documentFileName({ candidateName, companyName, jobTitle, suffix = '', ext = 'pdf' }) {
-    const clean = (s) => String(s || '')
+    // CV headers are often set in capitals ("NIKITA SAH"), which would carry
+    // into the filename and read as shouting in a recruiter's inbox. Only
+    // multi-word capitals are softened — a single all-caps token is an acronym
+    // ("KPMG", "BA") and title-casing it would be wrong.
+    const softenCase = (s) => (/\s/.test(s) && s === s.toUpperCase() && /[A-Z]{2}/.test(s)
+        ? s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase())
+        : s);
+
+    const clean = (s) => softenCase(String(s || '').trim())
         .replace(/[^\w\s-]/g, ' ')
         .trim()
         .replace(/[\s-]+/g, '_')
@@ -204,6 +212,11 @@ async function buildLayoutResume({ jobDescription, profile, outPath, onStage }) 
     const matchScore = Number(data.match_score) || 0;
     console.log(`[Resume] Tailored CV in its own layout (score ${matchScore}, ${data.changes?.length || 0} edits) → ${path.basename(pdfPath)}`);
 
+    // The name on the CV, not the name on the account. One person often runs
+    // applications on someone else's behalf, and naming the file after the
+    // account holder sends a recruiter a CV titled with a stranger's name.
+    const candidateName = data.layout?.header?.name || profile?.name || '';
+
     onStage?.('covering');
     const cover = await buildCoverLetter({
         jobDescription,
@@ -215,6 +228,7 @@ async function buildLayoutResume({ jobDescription, profile, outPath, onStage }) 
     return {
         ok: true,
         pdfPath,
+        candidateName,
         coverText: cover?.coverText || null,
         coverPdfPath: cover?.coverPdfPath || null,
         layout: data.layout,
@@ -306,6 +320,7 @@ export async function buildOptimizedResume({ jobDescription, profile, outPath, o
         return {
             ok: true,
             pdfPath,
+            candidateName: resume.name || profile?.name || '',
             coverText: cover?.coverText || null,
             coverPdfPath: cover?.coverPdfPath || null,
             resume,
@@ -357,17 +372,6 @@ export function getOptimizedResumeForJob(jobDescription, profile, job = {}) {
         error: null,
         createdAt: Date.now(),
         userEmail: profile?.email || null,
-        fileName: documentFileName({
-            candidateName: profile?.name,
-            companyName: job.companyName,
-            jobTitle: job.jobTitle,
-        }),
-        coverFileName: documentFileName({
-            candidateName: profile?.name,
-            companyName: job.companyName,
-            jobTitle: job.jobTitle,
-            suffix: 'Cover Letter',
-        }),
         // Surfaced by the status route so the UI can show what's happening
         // instead of an indeterminate spinner.
         stage: 'reading',
@@ -384,6 +388,17 @@ export function getOptimizedResumeForJob(jobDescription, profile, job = {}) {
         entry.status = result.ok ? 'done' : 'failed';
         entry.result = result.ok ? result : null;
         entry.error = result.ok ? null : result.error;
+        // Named once the CV is built, because only then is the candidate's own
+        // name known — it comes off the document, not off the account.
+        if (result.ok) {
+            const naming = {
+                candidateName: result.candidateName || profile?.name,
+                companyName: job.companyName,
+                jobTitle: job.jobTitle,
+            };
+            entry.fileName = documentFileName(naming);
+            entry.coverFileName = documentFileName({ ...naming, suffix: 'Cover Letter' });
+        }
         onStage(result.ok ? 'done' : 'reading');
         return result;
     });

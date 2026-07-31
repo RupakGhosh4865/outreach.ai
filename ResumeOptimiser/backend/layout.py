@@ -55,6 +55,12 @@ ROW_TOLERANCE = 3.5
 # left-margin position are the real signals; this only rules out prose.
 HEADING_MAX_CHARS = 60
 
+# Bumped whenever this parser's output changes shape or fixes a misreading.
+# Stored on every derived layout so a template produced by an older parser can
+# be spotted and rebuilt — otherwise a fix only reaches users who happen to
+# re-upload their CV.
+PARSER_VERSION = 3
+
 
 def _lines(page, page_index: int) -> list[dict]:
     """Flatten a page into styled text runs."""
@@ -278,6 +284,7 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
     header_x0 = min((r["x0"] for r in header_rows), default=body_x0)
 
     layout: dict[str, Any] = {
+        "parser_version": PARSER_VERSION,
         "page_size": page_size,
         "page_count": page_count,
         "margins": {"left": left_margin, "right": round(page_size[0] - max(r["x1"] for r in rows), 1)},

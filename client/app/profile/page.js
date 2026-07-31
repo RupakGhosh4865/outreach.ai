@@ -98,7 +98,7 @@ export default function ProfilePage() {
         name: '', email: '', linkedinUrl: '', githubUrl: '', portfolioUrl: '',
         resumeLink: '', techStack: '', experienceYears: 0, experienceMonths: 0, targetRoles: ''
     });
-    const [files, setFiles] = useState({ resume: null, resume_genai: null, resume_backend: null });
+    const [files, setFiles] = useState({ resume: null });
     const [teamMembers, setTeamMembers] = useState([]);
     const [newMember, setNewMember] = useState('');
     const [existing, setExisting] = useState(null);
@@ -175,8 +175,6 @@ export default function ProfilePage() {
                 .forEach(([k, v]) => fd.append(k, v));
             fd.append('teamMembers', JSON.stringify(teamMembers));
             if (files.resume)         fd.append('resume',         files.resume);
-            if (files.resume_genai)   fd.append('resume_genai',   files.resume_genai);
-            if (files.resume_backend) fd.append('resume_backend',  files.resume_backend);
 
             const data = await apiPost('/api/profile', fd);
             setExisting(data.profile);
@@ -197,7 +195,6 @@ export default function ProfilePage() {
         setLoading(false);
     }
 
-    const optimizerReady = Boolean(existing?.resumeGenaiName && existing?.resumeBackendName);
 
     return (
         <AuthGuard>
@@ -347,40 +344,22 @@ export default function ProfilePage() {
                         <CardTitle
                             icon={FileText}
                             accent="success"
-                            title="Resumes"
-                            description="The main one is attached to emails; Resume 1 and 2 feed the CV optimiser, which tailors them without changing their layout."
+                            title="Your CV"
+                            description="One CV. It is attached to your outgoing emails and is the document the optimiser tailors for each job, keeping your layout intact."
                             action={
-                                optimizerReady
-                                    ? <Badge tone="success" icon={Check}>Optimiser ready</Badge>
-                                    : <Badge tone="warning">Optimiser needs both</Badge>
+                                existing?.resumeOriginalName
+                                    ? <Badge tone="success" icon={Check}>Ready</Badge>
+                                    : <Badge tone="warning">Needed</Badge>
                             }
                         />
 
                         <FileSlot
-                            label="Main resume"
+                            label="Base CV"
                             fieldName="resume"
-                            hint="PDF or Word — attached to outgoing emails."
+                            hint="PDF or Word — tailored per job and attached to your emails."
                             existingName={existing?.resumeOriginalName}
                             onChange={handleFileChange}
                             onDelete={() => handleFileDelete('main')}
-                            icon={FileText}
-                        />
-                        <FileSlot
-                            label="Resume 1"
-                            fieldName="resume_genai"
-                            hint="PDF or Word — its layout becomes the template for tailored CVs."
-                            existingName={existing?.resumeGenaiName}
-                            onChange={handleFileChange}
-                            onDelete={() => handleFileDelete('genai')}
-                            icon={Sparkles}
-                        />
-                        <FileSlot
-                            label="Resume 2"
-                            fieldName="resume_backend"
-                            hint="PDF or Word — a second layout to tailor from."
-                            existingName={existing?.resumeBackendName}
-                            onChange={handleFileChange}
-                            onDelete={() => handleFileDelete('backend')}
                             icon={FileText}
                         />
 

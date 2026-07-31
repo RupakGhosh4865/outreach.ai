@@ -174,6 +174,26 @@ export function renderLayoutHtml(layout) {
 // document the candidate approved.
 const SERIF_RE = /palladio|palatino|times|georgia|garamond|book|charter|minion|serif|roman|utopia|libertine/i;
 
+/**
+ * Width for the skills table's label column, from the longest label present.
+ *
+ * A fixed guess either truncated "Governance & Risk" or left a chasm beside
+ * "Tools". Measuring the content keeps every row aligned and the values tight,
+ * whatever categories a given CV happens to use. Clamped so one unusually long
+ * label can't squeeze the values into a sliver.
+ */
+function labelColumnPt(layout, bodySize) {
+    const labels = arr(layout?.sections)
+        .flatMap((s) => arr(s.blocks))
+        .filter((b) => b.type === 'labeled')
+        .map((b) => String(b.label || '').length);
+
+    if (!labels.length) return 90;
+    // ~0.52em per character is a good average for mixed-case bold text.
+    const widest = Math.max(...labels) * bodySize * 0.52;
+    return Math.round(Math.min(150, Math.max(64, widest)));
+}
+
 /** Rendered page count, used to hold the output to the original's length. */
 async function pdfPageCount(filePath) {
     const { PDFParse } = await import('pdf-parse');
@@ -234,6 +254,7 @@ export async function renderLayoutPdf(layout, outPath, { bodyHtml = null, fitPag
             --name-size: ${pt(fonts.name?.size, 18)};
             --heading-size: ${pt(fonts.heading?.size, 12)};
             --header-align: ${layout?.header?.align === 'center' ? 'center' : 'left'};
+            --label-col: ${labelColumnPt(layout, Number(fonts.body?.size) || 10)}pt;
             --density: ${density};
         }`)
         .replace('<!--RESUME-->', body);

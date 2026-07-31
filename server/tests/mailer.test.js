@@ -131,3 +131,25 @@ test('senderIdentity strips quotes that would break the header', () => {
     const from = senderIdentity({ name: 'Ada "Hacker" Lovelace' }, 'ada@personal.com');
     assert.equal(from, '"Ada Hacker Lovelace" <app@example.com>');
 });
+
+test('documentFileName is built from the CV, not the account', async () => {
+    const { documentFileName } = await import('../services/resume.js');
+
+    // The account holder may be applying on someone else's behalf, so the name
+    // comes off the CV. All-caps headers are softened, but acronyms survive.
+    assert.equal(
+        documentFileName({ candidateName: 'NIKITA SAH', companyName: 'Amaris Consulting', jobTitle: 'Business Analyst' }),
+        'Nikita_Sah_Amaris_Consulting_Business_Analyst.pdf',
+    );
+    assert.equal(
+        documentFileName({ candidateName: 'Nikita Sah', companyName: 'KPMG', jobTitle: 'BA' }),
+        'Nikita_Sah_KPMG_BA.pdf',
+    );
+    assert.equal(
+        documentFileName({ candidateName: 'Nikita Sah', companyName: 'Amaris', jobTitle: 'BA', suffix: 'Cover Letter' }),
+        'Nikita_Sah_Amaris_BA_Cover_Letter.pdf',
+    );
+    // Missing parts are dropped rather than leaving dangling separators.
+    assert.equal(documentFileName({ jobTitle: 'Business Analyst' }), 'Business_Analyst.pdf');
+    assert.equal(documentFileName({}), 'Resume.pdf');
+});

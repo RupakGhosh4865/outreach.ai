@@ -28,6 +28,7 @@ import { getCompanyDomain, findEmployees, saveCompanyContacts } from '../service
 import { chatJson } from '../services/llm.js';
 import { claimDueJobs } from '../services/jobClaim.js';
 import { recordApplied, findApplied } from '../services/appliedJobs.js';
+import { syncResumeToOptimizer } from './profile.js';
 import { requireAuth, currentEmail } from '../middleware/auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -659,6 +660,7 @@ router.post('/send', async (req, res) => {
         // ── Optimise Resume ────────────────────────────────────────────────────
         let optimizedPdfPath = null;
         let coverPdfPath = null;
+        let candidateName = null;
         let optimizedResumeUsed = null;
         let optimizedMatchScore = null;
         let optimizedAddedKeywords = [];
@@ -670,6 +672,7 @@ router.post('/send', async (req, res) => {
             const optimResult = await getOptimizedResumeForJob(jobDescription, profile);
             if (optimResult.ok) {
                 optimizedPdfPath = optimResult.pdfPath;
+                candidateName = optimResult.candidateName;
                 optimizedResumeUsed = optimResult.source;
                 optimizedMatchScore = optimResult.matchScore;
                 optimizedAddedKeywords = optimResult.addedKeywords || [];
@@ -684,7 +687,7 @@ router.post('/send', async (req, res) => {
 
         // Never promise an attachment we don't have.
         const { attachments, body: outgoingBody, attachmentStatus } = attachResume({
-            optimizedPdfPath, coverPdfPath, profile, body, jobTitle, companyName,
+            optimizedPdfPath, coverPdfPath, profile, body, jobTitle, companyName, candidateName,
         });
 
         // ── Scheduled Send ────────────────────────────────────────────────────
@@ -882,11 +885,24 @@ function ownedEntry(req, key) {
 // Lets the optimisation UI render the real document while it is being tailored,
 // instead of showing an abstract progress bar over nothing.
 router.get('/resume-template', async (req, res) => {
+    const optimizer = process.env.RESUME_OPTIMIZER_URL || 'http://localhost:8002';
+    const email = currentEmail(req);
     try {
-        const { data } = await axios.get(`${process.env.RESUME_OPTIMIZER_URL || 'http://localhost:8002'}/api/template`, {
-            params: { user_email: currentEmail(req) },
-            timeout: 15000,
+        let { data } = await axios.get(`${optimizer}/api/template`, {
+            params: { user_email: email }, timeout: 15000,
         });
+
+        // Rebuilt in place when the stored template predates the current PDF
+        // parser, so improvements to the reader reach existing users without
+        // them having to re-upload their CV.
+        if (data?.stale) {
+            const profile = await UserProfile.findOne({ email });
+            if (await syncResumeToOptimizer(profile)) {
+                ({ data } = await axios.get(`${optimizer}/api/template`, {
+                    params: { user_email: email }, timeout: 15000,
+                }));
+            }
+        }
         res.json(data);
     } catch (err) {
         // No template is an ordinary state (legacy uploads) — the panel simply
@@ -984,14 +1000,11 @@ router.post('/analyze-fit', async (req, res) => {
         const profile = await UserProfile.findOne({ email: currentEmail(req) });
         if (!profile) return res.status(404).json({ message: 'Profile not found.' });
 
-        // 2. Parse resumes
-        const resumes = { main: '', genai: '', backend: '' };
-        if (profile.resumePath) resumes.main = await parseResume(profile.resumePath);
-        if (profile.resumeGenaiPath) resumes.genai = await parseResume(profile.resumeGenaiPath);
-        if (profile.resumeBackendPath) resumes.backend = await parseResume(profile.resumeBackendPath);
-
-        if (!resumes.main && !resumes.genai && !resumes.backend) {
-            return res.status(400).json({ message: 'No resumes found in profile.' });
+        // 2. Parse the CV. One per account since the extra role-specific slots
+        // were removed — there is nothing to pick between any more.
+        const resumeText = profile.resumePath ? await parseResume(profile.resumePath) : '';
+        if (!resumeText) {
+            return res.status(400).json({ message: 'No CV found on your profile. Upload one first.' });
         }
 
         // 3. ATS scan
@@ -1000,35 +1013,18 @@ router.post('/analyze-fit', async (req, res) => {
             user: `Job Description:
 ${jobDescription.slice(0, 4000)}
 
---- Main Resume ---
-${resumes.main.slice(0, 3000) || "none"}
+--- Candidate CV ---
+${resumeText.slice(0, 3000)}
 
---- Gen AI Resume ---
-${resumes.genai.slice(0, 3000) || "none"}
-
---- Backend Resume ---
-${resumes.backend.slice(0, 3000) || "none"}
-
-Score each resume 0-100 against this job. Score a resume marked "none" as 0.
-recommendedResume: whichever of the three scores highest.
+Score this CV 0-100 against the job.
 advice: 2-4 specific, actionable items ("Missing AWS experience", "Quantify the migration project"), not generic tips.`,
             schema: {
                 type: 'object',
                 properties: {
-                    scores: {
-                        type: 'object',
-                        properties: {
-                            main: { type: 'integer' },
-                            genai: { type: 'integer' },
-                            backend: { type: 'integer' },
-                        },
-                        required: ['main', 'genai', 'backend'],
-                        additionalProperties: false,
-                    },
-                    recommendedResume: { type: 'string', enum: ['main', 'genai', 'backend'] },
+                    score: { type: 'integer' },
                     advice: { type: 'array', items: { type: 'string' } },
                 },
-                required: ['scores', 'recommendedResume', 'advice'],
+                required: ['score', 'advice'],
                 additionalProperties: false,
             },
             schemaName: 'ats_fit',

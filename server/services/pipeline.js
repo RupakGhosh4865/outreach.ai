@@ -68,6 +68,7 @@ async function stepGenerateCv(app, profile) {
         patch: {
             cv: {
                 pdfPath: result.pdfPath,
+                candidateName: result.candidateName,
                 coverPdfPath: result.coverPdfPath,
                 coverText: result.coverText,
                 content: result.resume,
@@ -184,6 +185,7 @@ async function stepSendEmail(app, profile) {
             body: app.email?.body,
             jobTitle: app.jobTitle,
             companyName: app.companyName,
+            candidateName: app.cv?.candidateName,
         });
 
         const { sentTo, errors } = await sendToRecipients({

@@ -87,11 +87,13 @@ export function senderIdentity(profile, fallbackEmail) {
  *
  * @returns {{ attachments: Array, body: string, attachmentStatus: 'optimized'|'profile'|'missing' }}
  */
-export function attachResume({ optimizedPdfPath, coverPdfPath, profile, body, jobTitle, companyName }) {
+export function attachResume({ optimizedPdfPath, coverPdfPath, profile, body, jobTitle, companyName, candidateName }) {
     // The recruiter sees the filename before they open anything, so it carries
     // the candidate and the role rather than "Resume_Application.pdf".
     const name = (suffix) => documentFileName({
-        candidateName: profile?.name, companyName, jobTitle, suffix,
+        // The CV's own name where we have it — the account holder may be
+        // applying on someone else's behalf.
+        candidateName: candidateName || profile?.name, companyName, jobTitle, suffix,
     });
 
     // Only ever accompanies a CV — a cover letter on its own would arrive as an
