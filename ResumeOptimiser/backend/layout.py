@@ -29,10 +29,18 @@ import fitz  # PyMuPDF
 BULLET_CHARS = "•◦‣∙·▪▫⋄◆●○–—*"
 BULLET_RE = re.compile(rf"^\s*[{re.escape(BULLET_CHARS)}]\s*(?=\S)")
 
-MONTHS = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*"
+# Spelled out rather than "Jan|Feb|...[a-z]*": the open-ended suffix let "Jun"
+# swallow "Junior", "Mar" swallow "Marketing" and "Sep" swallow "Sepsis", so
+# those headings were mistaken for dates.
+MONTHS = (
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?"
+    r"|Aug(?:ust)?|Sep(?:t|tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)"
+)
 # Matches "2021 - Present", "(Nov'24 - March'25)", "Dec 2025 – Present", "June,2024".
+# Word boundaries matter: without them "Mar" matches inside "Summary" and
+# "Jun" inside "Junior", so those headings were read as dates and skipped.
 DATEISH_RE = re.compile(
-    rf"(?:{MONTHS}|\d{{4}}|['’]\d{{2}}|Present|Current|Ongoing)",
+    rf"\b(?:{MONTHS}|\d{{4}}|['’]\d{{2}}|Present|Current|Ongoing)\b",
     re.IGNORECASE,
 )
 
@@ -40,6 +48,12 @@ CONTACT_RE = re.compile(r"[@]|\+\d|linkedin|github|https?://|portfolio|\|\s*\d")
 
 # Rows are one visual line when their baselines differ by less than this.
 ROW_TOLERANCE = 3.5
+
+# Longest a row can be and still be a section heading. This was 40, which
+# rejected "Certifications & Professional Development" (41 chars) — the heading
+# was absorbed into the skills row above it and the section vanished. Size and
+# left-margin position are the real signals; this only rules out prose.
+HEADING_MAX_CHARS = 60
 
 
 def _lines(page, page_index: int) -> list[dict]:
@@ -133,31 +147,62 @@ def _rows(lines: list[dict], page_width: float) -> list[dict]:
     return [r for r in rows if r["text"] or r["right"]]
 
 
-def _pick_heading_size(rows: list[dict], body_size: float, name_size: float, left_margin: float) -> Optional[float]:
-    """
-    Find the font size used for section headings.
+def _heading_shaped(row: dict, left_margin: float) -> bool:
+    """Whether a row could be a section heading on shape alone, ignoring style."""
+    if row["right"] or row["label"] or row["x0"] > left_margin + 6:
+        return False
+    text = row["text"].strip()
+    return bool(text) and len(text) <= HEADING_MAX_CHARS \
+        and not BULLET_RE.match(text) and not DATEISH_RE.search(text)
 
-    Section headings share one distinctive size, sit at the left margin, are
-    short, and carry no dates. Rather than judging each line on its own — which
-    promotes every bold label like "Languages:" — we look for the size class
-    whose members all behave that way.
+
+def _pick_heading_style(rows: list[dict], body_size: float, name_size: float,
+                        left_margin: float) -> Optional[dict]:
     """
-    candidates: dict[float, int] = {}
-    for row in rows:
-        if row["size"] <= body_size or row["size"] >= name_size:
-            continue
-        if row["right"] or row["x0"] > left_margin + 6:
-            continue
+    Find the style section headings are set in.
+
+    Headings share one look, sit at the left margin, are short and carry no
+    dates. Rather than judging each line alone — which promotes every bold label
+    like "Languages:" — we look for the style class whose members all behave
+    that way, and take the one used most.
+
+    Three passes, because CVs mark headings in three common ways. A larger size
+    is the usual typeset-CV signal; Word CVs very often use bold or all-caps at
+    body size instead, and those used to yield no headings at all — the whole
+    resume collapsed into one section and nothing could be tailored.
+    """
+    def best_size(predicate) -> Optional[float]:
+        counts: dict[float, int] = {}
+        for row in rows:
+            if not _heading_shaped(row, left_margin) or not predicate(row):
+                continue
+            counts[row["size"]] = counts.get(row["size"], 0) + 1
+        if not counts:
+            return None
+        # Most-used qualifying size; ties break toward the larger, which is more
+        # likely to be a heading than an emphasised entry title.
+        return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
+
+    # 1. Set larger than the body text.
+    size = best_size(lambda r: body_size < r["size"] < name_size)
+    if size is not None:
+        return {"size": size, "bold": None, "upper": False}
+
+    def is_upper(row):
         text = row["text"].strip()
-        if not text or len(text) > 40 or BULLET_RE.match(text) or DATEISH_RE.search(text):
-            continue
-        candidates[row["size"]] = candidates.get(row["size"], 0) + 1
+        return text == text.upper() and any(c.isalpha() for c in text)
 
-    if not candidates:
-        return None
-    # Most-used qualifying size; ties break toward the larger, which is more
-    # likely to be a heading than an emphasised entry title.
-    return max(candidates.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    # 2. Bold at body size.
+    size = best_size(lambda r: r["size"] <= body_size and r["bold"])
+    if size is not None:
+        return {"size": size, "bold": True, "upper": False}
+
+    # 3. All-caps at body size.
+    size = best_size(lambda r: r["size"] <= body_size and is_upper(r))
+    if size is not None:
+        return {"size": size, "bold": None, "upper": True}
+
+    return None
 
 
 def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
@@ -197,15 +242,21 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
     left_margin = min(r["x0"] for r in rows)
     name_size = max(r["size"] for r in rows[:6]) if rows else body_size
 
-    heading_size = _pick_heading_size(rows, body_size, name_size, left_margin)
+    heading_style = _pick_heading_style(rows, body_size, name_size, left_margin)
+    heading_size = heading_style["size"] if heading_style else None
 
     def is_heading(row: dict) -> bool:
-        if heading_size is None or row["size"] != heading_size:
+        if not heading_style or row["size"] != heading_style["size"]:
             return False
-        if row["right"] or row["x0"] > left_margin + 6:
+        # When headings are only distinguished by weight or case, that has to be
+        # checked too — at body size the size alone matches ordinary prose.
+        if heading_style["bold"] and not row["bold"]:
             return False
-        text = row["text"].strip()
-        return bool(text) and len(text) <= 40 and not BULLET_RE.match(text)
+        if heading_style["upper"]:
+            text = row["text"].strip()
+            if text != text.upper() or not any(c.isalpha() for c in text):
+                return False
+        return _heading_shaped(row, left_margin)
 
     # ── Header: everything above the first section heading ──
     first = next((i for i, r in enumerate(rows) if is_heading(r)), len(rows))
@@ -255,7 +306,43 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
     section: Optional[dict] = None
     entry: Optional[dict] = None
     last_bullet: Optional[dict] = None  # (container list, index) of the bullet still being wrapped
+    last_labeled: Optional[tuple] = None  # (block, value column x) of a labelled row that may wrap
     bullet_indent: Optional[float] = None
+
+    # Some PDFs — notably anything printed from HTML — draw list markers as
+    # layout decoration and leave them out of the text layer entirely. Without
+    # this every bullet would be read as a paragraph and the list structure
+    # would be lost. Only used when the document contains no marker glyphs at
+    # all, so it can never override real markers.
+    # The document's pure line leading: the distance between two lines of the
+    # same wrapped sentence. A new list item always sits further down, because
+    # the item carries margin on top of the leading. With no marker glyph to go
+    # on, that difference is the only thing separating "next item" from "same
+    # item, second line".
+    #
+    # Taken as a low percentile rather than the median — in a bullet-heavy CV
+    # most gaps are item-to-item, so the median is an item gap and every item
+    # would read as a continuation.
+    gaps = sorted(
+        b["y"] - a["y"]
+        for a, b in zip(rows, rows[1:])
+        if a["page"] == b["page"] and 0 < b["y"] - a["y"] < 60
+    )
+    leading = gaps[int(len(gaps) * 0.15)] if gaps else 0.0
+
+    glyphless_indent: Optional[float] = None
+    if not any(BULLET_RE.match(r["text"].strip()) for r in rows):
+        indents: dict[float, int] = {}
+        for row in rows[first:]:
+            if is_heading(row) or row["right"] or row["label"] or row["bold"]:
+                continue
+            if row["x0"] > left_margin + 4:
+                indents[row["x0"]] = indents.get(row["x0"], 0) + 1
+        if indents:
+            candidate, count = max(indents.items(), key=lambda kv: kv[1])
+            # A one-off indented line is a quirk; a repeated one is a list.
+            if count >= 3:
+                glyphless_indent = candidate
 
     def ensure_section():
         nonlocal section
@@ -264,7 +351,9 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
             layout["sections"].append(section)
         return section
 
-    for row in rows[first:]:
+    body_rows = rows[first:]
+    for i, row in enumerate(body_rows):
+        prev_row = body_rows[i - 1] if i else None
         text = row["text"].strip()
 
         if is_heading(row):
@@ -272,6 +361,7 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
             layout["sections"].append(section)
             entry = None
             last_bullet = None
+            last_labeled = None
             continue
 
         if not text and not row["right"]:
@@ -280,22 +370,35 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
         ensure_section()
 
         # ── Bullet ──
+        # Either a recognised marker glyph, or — for the PDFs that drop their
+        # list markers from the text layer entirely — a row sitting at the
+        # indent an earlier marked bullet established in this same entry.
         bullet = BULLET_RE.match(text)
-        if bullet:
-            content = text[bullet.end():].strip()
+        unmarked = (
+            bullet is None
+            and glyphless_indent is not None
+            and not row["right"] and not row["label"] and not row["bold"]
+            and abs(row["x0"] - glyphless_indent) < 1.5
+        )
+        def start_bullet(content: str) -> None:
+            nonlocal last_bullet, bullet_indent
             bullet_indent = row["x0"]
             if entry is not None:
                 entry["bullets"].append(content)
                 last_bullet = (entry["bullets"], len(entry["bullets"]) - 1)
+                return
+            blocks = section["blocks"]
+            if blocks and blocks[-1]["type"] == "bullets":
+                blocks[-1]["items"].append(content)
+                last_bullet = (blocks[-1]["items"], len(blocks[-1]["items"]) - 1)
             else:
-                blocks = section["blocks"]
-                if blocks and blocks[-1]["type"] == "bullets":
-                    blocks[-1]["items"].append(content)
-                    last_bullet = (blocks[-1]["items"], len(blocks[-1]["items"]) - 1)
-                else:
-                    block = {"type": "bullets", "id": next_id("b"), "items": [content]}
-                    blocks.append(block)
-                    last_bullet = (block["items"], 0)
+                block = {"type": "bullets", "id": next_id("b"), "items": [content]}
+                blocks.append(block)
+                last_bullet = (block["items"], 0)
+
+        # A marker is unambiguous: this is a new bullet.
+        if bullet:
+            start_bullet(text[bullet.end():].strip())
             continue
 
         # ── Wrapped continuation of the previous bullet ──
@@ -303,23 +406,57 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
         # flush with the margin, so indentation alone can't decide it. The
         # reliable signal is that the bullet it continues has no sentence-final
         # punctuation yet; an indented row is taken as a continuation either way.
+        #
+        # This runs before the unmarked-bullet branch below: without a marker a
+        # wrapped line sits at exactly the same indent as a new bullet, so the
+        # only thing telling them apart is whether the previous one finished.
         if last_bullet and not row["right"] and not row["bold"]:
             container, index = last_bullet
-            indented = bullet_indent is not None and row["x0"] > bullet_indent
             unfinished = not container[index].rstrip().endswith((".", ":", "!", "?"))
-            if indented or unfinished:
+            if unmarked:
+                # Markerless list: only the line spacing can tell a wrapped line
+                # from the next item, since both sit at the same indent.
+                continuation = bool(
+                    prev_row and leading > 0
+                    and row["page"] == prev_row["page"]
+                    and (row["y"] - prev_row["y"]) <= leading * 1.10
+                )
+            else:
+                indented = bullet_indent is not None and row["x0"] > bullet_indent
+                continuation = indented or unfinished
+            if continuation:
                 container[index] = f"{container[index]} {text}".strip()
                 continue
+
+        # A row at the established list indent, in a document whose markers were
+        # never written to the text layer.
+        if unmarked:
+            start_bullet(text)
+            continue
 
         # ── Labelled row (skills table) ──
         if row["label"] and not row["right"]:
             entry = None
             last_bullet = None
-            section["blocks"].append({
+            block = {
                 "type": "labeled", "id": next_id("b"),
                 "label": row["label"], "text": text,
-            })
+            }
+            section["blocks"].append(block)
+            # Remember where the value column starts so wrapped lines can be
+            # recognised and folded back in below.
+            last_labeled = (block, row["x0"])
             continue
+
+        # ── Wrapped continuation of a labelled row ──
+        # A long skills list wraps under its value column with no label of its
+        # own. Left as a paragraph it becomes an orphan line adrift from the
+        # category it belongs to.
+        if last_labeled and not row["right"] and not row["label"] and not row["bold"]:
+            block, value_x0 = last_labeled
+            if row["x0"] >= value_x0 - 2:
+                block["text"] = f"{block['text']} {text}".strip()
+                continue
 
         # ── Entry header: a titled row with a date range on the right ──
         if row["right"]:
@@ -378,15 +515,77 @@ def editable_view(layout: dict) -> dict:
             elif block["type"] == "bullets":
                 blocks.append({"id": block["id"], "type": "bullets", "items": list(block["items"])})
             elif block["type"] == "entry" and block["bullets"]:
-                blocks.append({
+                title, _, employer = split_title(block["left"])
+                entry = {
                     "id": block["id"], "type": "entry",
-                    # Read-only context so bullets can be aimed at the right role.
-                    "role_context": block["left"],
                     "bullets": list(block["bullets"]),
-                })
+                }
+                if employer:
+                    # Only the title is offered for rewriting; the employer is
+                    # sent as context so the model knows where the work happened
+                    # but has no way to alter it.
+                    entry["left"] = title
+                    entry["employer_context"] = employer
+                else:
+                    entry["role_context"] = block["left"]
+                blocks.append(entry)
         if blocks:
             sections.append({"id": sec["id"], "heading": sec.get("heading", ""), "blocks": blocks})
     return {"sections": sections}
+
+
+# Separators CVs use between a job title and its employer, most specific first.
+TITLE_SEPARATORS = (" | ", " · ", ", ", " @ ", " – ", " - ")
+
+
+def split_title(left: str) -> tuple[str, str, str]:
+    """
+    Split an entry heading into (title, separator, employer).
+
+    "Lead Business Analyst, Barclays PLC" -> ("Lead Business Analyst", ", ", "Barclays PLC")
+
+    Returns ("", "", "") when the two can't be told apart — a project name like
+    "RESEARCH.IO [Live]" has no employer to protect, so the whole string stays
+    locked rather than being guessed at.
+    """
+    for sep in TITLE_SEPARATORS:
+        if sep in left:
+            title, employer = left.rsplit(sep, 1)
+            if title.strip() and employer.strip():
+                return title.strip(), sep, employer.strip()
+    return "", "", ""
+
+
+def _retitle(block: dict, incoming) -> Optional[str]:
+    """
+    The new entry heading to accept, or None to keep the original.
+
+    Job titles are re-expressed in the target role's language, which the account
+    owner has asked for. The employer is not theirs to change, so it is carried
+    over from the original rather than taken from the model: whatever the model
+    returns, the company on the CV stays the company they worked for.
+    """
+    if not isinstance(incoming, str) or not incoming.strip():
+        return None
+
+    original = block.get("left", "")
+    new = " ".join(incoming.split())
+    if new == original:
+        return None
+
+    _, sep, employer = split_title(original)
+    if not employer:
+        # Employer and title are indistinguishable (a project name, say) — the
+        # safe move is to leave it alone.
+        return None
+
+    new_title, _, _ = split_title(new)
+    new_title = (new_title or new).strip()
+    if not new_title:
+        return None
+
+    rebuilt = f"{new_title}{sep}{employer}"
+    return rebuilt if rebuilt != original else None
 
 
 def apply_rewrite(layout: dict, rewrite: dict) -> tuple[dict, list[dict]]:
@@ -429,6 +628,15 @@ def apply_rewrite(layout: dict, rewrite: dict) -> tuple[dict, list[dict]]:
                     block["text"] = text
 
             elif block["type"] in ("bullets", "entry"):
+                if block["type"] == "entry":
+                    retitled = _retitle(block, new.get("left"))
+                    if retitled:
+                        changes.append({
+                            "block_id": block["id"], "field": "left",
+                            "before": block["left"], "after": retitled,
+                        })
+                        block["left"] = retitled
+
                 key = "items" if block["type"] == "bullets" else "bullets"
                 originals = block[key]
                 incoming = new.get(key)

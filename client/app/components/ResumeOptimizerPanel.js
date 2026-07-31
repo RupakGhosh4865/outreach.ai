@@ -125,15 +125,20 @@ export default function ResumeOptimizerPanel({
     const pdfPath = result.pdfUrl || `/api/jobs/optimize-resume/pdf?key=${key}`;
     const winner = result.selectedResume;
 
+    // Named for the application — Nikita_Sah_Barclays_Business_Analyst.pdf —
+    // so a folder of downloads stays navigable and the recruiter sees who sent it.
+    const cvName = result.fileName || 'Optimized_Resume.pdf';
+    const coverName = result.coverFileName || 'Cover_Letter.pdf';
+
     const preview = withFile('preview', async () => {
         // Falls back to a download if the browser blocked the new tab.
         const opened = await openAuthedFile(pdfPath);
-        if (!opened) await downloadAuthedFile(pdfPath, 'Optimized_Resume.pdf');
+        if (!opened) await downloadAuthedFile(pdfPath, cvName);
     });
 
-    const download = withFile('download', () => downloadAuthedFile(pdfPath, 'Optimized_Resume.pdf'));
+    const download = withFile('download', () => downloadAuthedFile(pdfPath, cvName));
 
-    const downloadCover = withFile('cover', () => downloadAuthedFile(result.coverUrl, 'Cover_Letter.pdf'));
+    const downloadCover = withFile('cover', () => downloadAuthedFile(result.coverUrl, coverName));
 
     return (
         <Card className="mb-4 border-success/25 bg-success/4">

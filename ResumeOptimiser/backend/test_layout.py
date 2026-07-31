@@ -86,9 +86,10 @@ def test_bullet_count_mismatch_is_rejected_wholesale():
     assert merged["sections"][2]["blocks"][0]["bullets"] == layout["sections"][2]["blocks"][0]["bullets"]
 
 
-def test_locked_fields_cannot_be_changed():
-    # Dates, employers and headings are facts. Even when the model returns new
-    # values for them, the originals must survive.
+def test_dates_employers_and_headings_cannot_be_changed():
+    # The account owner has opted into retitling, but the employer, the dates
+    # and the section heading are matters of record. A model that returns new
+    # values for them must not be able to rewrite employment history.
     layout = sample_layout()
     merged, _ = apply_rewrite(layout, {"sections": [
         {"id": "s3", "heading": "Work History", "blocks": [{
@@ -99,10 +100,34 @@ def test_locked_fields_cannot_be_changed():
     ]})
 
     entry = merged["sections"][2]["blocks"][0]
-    assert entry["left"] == "Product Analyst | Barclays PLC"
+    # The title moved; the employer did not follow it.
+    assert entry["left"] == "Senior Director | Barclays PLC"
+    assert "Goldman Sachs" not in entry["left"]
     assert entry["right"] == "Dec 2025 - Present"
     assert entry["sub"] == "Bournemouth, UK"
     assert merged["sections"][2]["heading"] == "Professional Experience"
+
+
+def test_a_bare_title_is_recombined_with_the_real_employer():
+    # editable_view sends the title alone, so this is the shape the model
+    # normally replies with.
+    layout = sample_layout()
+    merged, changes = apply_rewrite(layout, {"sections": [
+        {"id": "s3", "blocks": [{"id": "b3", "left": "Technology Business Analyst"}]},
+    ]})
+    assert merged["sections"][2]["blocks"][0]["left"] == "Technology Business Analyst | Barclays PLC"
+    assert any(c.get("field") == "left" for c in changes)
+
+
+def test_a_title_with_no_separable_employer_stays_locked():
+    # "RESEARCH.IO [Live]" is a project name with no employer to preserve, so
+    # there is no safe way to tell title from subject — leave it alone.
+    layout = sample_layout()
+    layout["sections"][2]["blocks"][0]["left"] = "RESEARCH.IO [Live]"
+    merged, _ = apply_rewrite(layout, {"sections": [
+        {"id": "s3", "blocks": [{"id": "b3", "left": "Enterprise Data Platform"}]},
+    ]})
+    assert merged["sections"][2]["blocks"][0]["left"] == "RESEARCH.IO [Live]"
 
 
 def test_empty_and_non_string_values_leave_the_original():
@@ -115,11 +140,13 @@ def test_empty_and_non_string_values_leave_the_original():
     assert merged == layout
 
 
-def test_editable_view_hides_locked_fields():
+def test_editable_view_offers_the_title_but_not_the_employer():
     view = editable_view(sample_layout())
     entry = view["sections"][2]["blocks"][0]
-    assert "right" not in entry and "sub" not in entry and "left" not in entry
-    assert entry["role_context"] == "Product Analyst | Barclays PLC"
+    assert "right" not in entry and "sub" not in entry
+    # The title is editable; the employer is context only.
+    assert entry["left"] == "Product Analyst"
+    assert entry["employer_context"] == "Barclays PLC"
     assert "Nikita Sah" not in str(view)
 
 
@@ -128,6 +155,37 @@ def test_rewrite_does_not_mutate_the_stored_layout():
     snapshot = copy.deepcopy(layout)
     apply_rewrite(layout, {"sections": [{"id": "s1", "blocks": [{"id": "b1", "text": "Changed."}]}]})
     assert layout == snapshot
+
+
+def test_month_names_are_not_matched_inside_words():
+    # "Mar" inside "Summary" and "Jun" inside "Junior" made those headings look
+    # like dates, so the section was skipped and its content swallowed by the
+    # one above it.
+    from layout import DATEISH_RE
+    for word in ("Summary", "Junior Developer", "Marketing", "Sepsis", "Augmented"):
+        assert not DATEISH_RE.search(word), f"{word} should not read as a date"
+    for date in ("Mar 2023", "Dec'25 - Present", "2021 - 2025", "June, 2024"):
+        assert DATEISH_RE.search(date), f"{date} should read as a date"
+
+
+def test_heading_style_falls_back_to_weight_then_case():
+    # Typeset CVs size their headings up; Word CVs very often just embolden or
+    # capitalise at body size. All three have to be readable or the resume
+    # collapses into a single section.
+    from layout import _pick_heading_style
+
+    def row(text, size, bold=False, x0=60.0):
+        return {"text": text, "size": size, "bold": bold, "x0": x0,
+                "right": "", "label": "", "y": 0.0, "page": 0}
+
+    larger = [row("Experience", 13), row("Education", 13), row("Body text here", 11)]
+    assert _pick_heading_style(larger, 11, 20, 60.0) == {"size": 13, "bold": None, "upper": False}
+
+    bolded = [row("Experience", 11, bold=True), row("Education", 11, bold=True), row("Body text", 11)]
+    assert _pick_heading_style(bolded, 11, 20, 60.0) == {"size": 11, "bold": True, "upper": False}
+
+    capped = [row("EXPERIENCE", 11), row("EDUCATION", 11), row("Body text", 11)]
+    assert _pick_heading_style(capped, 11, 20, 60.0) == {"size": 11, "bold": None, "upper": True}
 
 
 if __name__ == "__main__":

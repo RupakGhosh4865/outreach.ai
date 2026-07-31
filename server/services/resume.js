@@ -68,6 +68,24 @@ export async function parseResume(resumePath) {
     }
 }
 
+/**
+ * Filename for a generated document: `Name_Company_Role.pdf`.
+ *
+ * Applications are often filed by filename alone, so "Optimized_Resume.pdf" is
+ * both anonymous to the recruiter and unmanageable for the candidate once a few
+ * have been downloaded. Empty parts are dropped rather than leaving separators.
+ */
+export function documentFileName({ candidateName, companyName, jobTitle, suffix = '', ext = 'pdf' }) {
+    const clean = (s) => String(s || '')
+        .replace(/[^\w\s-]/g, ' ')
+        .trim()
+        .replace(/[\s-]+/g, '_')
+        .slice(0, 60);
+
+    const parts = [candidateName, companyName, jobTitle, suffix].map(clean).filter(Boolean);
+    return `${parts.length ? parts.join('_') : 'Resume'}.${ext}`;
+}
+
 /** Condense a UserProfile into the summary the optimizer uses as source material. */
 export function profileSummary(profile) {
     if (!profile) return '';
@@ -311,8 +329,14 @@ export async function buildOptimizedResume({ jobDescription, profile, outPath, o
     }
 }
 
-/** Cached wrapper around buildOptimizedResume, keyed on (user, job description). */
-export function getOptimizedResumeForJob(jobDescription, profile) {
+/**
+ * Cached wrapper around buildOptimizedResume, keyed on (user, job description).
+ *
+ * `job` carries the company and role purely so generated files can be named
+ * after them; it never affects the cache key, because the same job description
+ * produces the same CV whatever the posting was labelled.
+ */
+export function getOptimizedResumeForJob(jobDescription, profile, job = {}) {
     const key = optimKey(jobDescription, profile?.email);
     const cached = optimCache.get(key);
     if (cached) {
@@ -333,6 +357,17 @@ export function getOptimizedResumeForJob(jobDescription, profile) {
         error: null,
         createdAt: Date.now(),
         userEmail: profile?.email || null,
+        fileName: documentFileName({
+            candidateName: profile?.name,
+            companyName: job.companyName,
+            jobTitle: job.jobTitle,
+        }),
+        coverFileName: documentFileName({
+            candidateName: profile?.name,
+            companyName: job.companyName,
+            jobTitle: job.jobTitle,
+            suffix: 'Cover Letter',
+        }),
         // Surfaced by the status route so the UI can show what's happening
         // instead of an indeterminate spinner.
         stage: 'reading',
