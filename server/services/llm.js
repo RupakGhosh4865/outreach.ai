@@ -18,7 +18,10 @@ function getClient() {
     if (!client) {
         const apiKey = process.env.OPENAI_API_KEY;
         if (!apiKey) throw new Error('OPENAI_API_KEY is not set — add it to server/.env.');
-        client = new OpenAI({ apiKey, timeout: 60000, maxRetries: 0 }); // retries handled below
+        // 90s: writing an email or scoring a CV against a long job description
+        // regularly runs past 60s on a slow connection, and a timeout there is
+        // indistinguishable to the user from the feature being broken.
+        client = new OpenAI({ apiKey, timeout: 90000, maxRetries: 0 }); // retries handled below
     }
     return client;
 }
@@ -47,9 +50,25 @@ export const isQuotaError = (err) =>
     err?.error?.type === 'insufficient_quota' ||
     /exceeded your current quota|billing/i.test(err?.message || '');
 
-const isRetryable = (err) => {
+const RETRYABLE_CODES = new Set([
+    'ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED', 'EPIPE', 'EAI_AGAIN', 'ENOTFOUND',
+]);
+
+/**
+ * The SDK surfaces a dropped or slow connection as APIConnectionError /
+ * APIConnectionTimeoutError, which carry **no** `status` and **no** `code` —
+ * so matching on those alone classified the single most common transient
+ * failure as permanent. A timed-out request then failed the whole call on the
+ * first attempt, which is what left generated emails blank.
+ */
+const isConnectionError = (err) =>
+    typeof err?.name === 'string' && err.name.startsWith('APIConnection');
+
+export const isRetryable = (err) => {
     if (isQuotaError(err)) return false;
-    return RETRYABLE_STATUS.has(err?.status) || ['ECONNRESET', 'ETIMEDOUT', 'ECONNREFUSED'].includes(err?.code);
+    return RETRYABLE_STATUS.has(err?.status)
+        || RETRYABLE_CODES.has(err?.code)
+        || isConnectionError(err);
 };
 
 async function withRetry(fn, { attempts = 3, label = 'llm' } = {}) {
