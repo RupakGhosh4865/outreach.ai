@@ -59,11 +59,27 @@
   .entry-meta { flex-shrink: 0; white-space: nowrap; color: #3c4149; }
   .entry-sub { font-style: italic; color: #3c4149; }
 
-  /* Skills tables: a bold category in a fixed left column with its values
-     beside it, as in the source document. */
-  .labeled { display: flex; gap: 10px; margin-bottom: calc(1.5px * var(--density)); }
-  .labeled-key { flex: 0 0 auto; min-width: 92px; font-weight: 700; }
-  .labeled-val { flex: 1 1 auto; }
+  /* Skills table. A fixed label column keeps every category aligned down the
+     page and gives the values a clean edge to wrap against — without it the
+     rows ran together and a long list looked like one unbroken paragraph.
+     Rows are separated by a hairline rather than relying on spacing alone. */
+  .labeled {
+    display: flex;
+    gap: 12px;
+    padding: calc(2.5px * var(--density)) 0;
+    border-top: 0.4pt solid #e2e5ea;
+    break-inside: avoid;
+  }
+  .labeled:first-of-type { border-top: 0; }
+  .labeled-key {
+    flex: 0 0 var(--label-col);
+    max-width: var(--label-col);
+    font-weight: 700;
+    /* Long category names wrap inside their column instead of shoving the
+       values across the page. */
+    overflow-wrap: break-word;
+  }
+  .labeled-val { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
 
   ul { margin: calc(2px * var(--density)) 0 0; padding-left: 15px; }
   li { margin-bottom: calc(1.5px * var(--density)); }

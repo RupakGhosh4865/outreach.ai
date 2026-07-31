@@ -24,10 +24,7 @@ if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 const storage = multer.diskStorage({
     destination: (req, file, cb) => cb(null, uploadsDir),
     filename: (req, file, cb) => {
-        const prefix = file.fieldname === 'resume_genai' ? 'genai'
-            : file.fieldname === 'resume_backend' ? 'backend'
-            : 'resume';
-        cb(null, `${prefix}_${Date.now()}${path.extname(file.originalname)}`);
+        cb(null, `resume_${Date.now()}${path.extname(file.originalname)}`);
     },
 });
 
@@ -60,11 +57,10 @@ const contentTypeFor = (file) =>
 const forwardNameFor = (file) =>
     `${path.basename(file.originalname || 'resume', path.extname(file.originalname || ''))}${path.extname(file.path)}`;
 
-// Accept 3 file slots: resume (main), resume_genai, resume_backend
+// One CV per account. The two extra role-specific slots were removed: they
+// doubled the upload work, and tailoring only ever used one of them.
 const uploadFields = upload.fields([
     { name: 'resume', maxCount: 1 },
-    { name: 'resume_genai', maxCount: 1 },
-    { name: 'resume_backend', maxCount: 1 },
 ]);
 
 // POST /api/profile
@@ -82,7 +78,7 @@ router.post('/', uploadFields, async (req, res) => {
         // (text extraction, the optimizer, email attachments) keeps its
         // PDF-only assumption. `originalname` is left alone — the UI still
         // shows the user the filename they picked.
-        for (const field of ['resume', 'resume_genai', 'resume_backend']) {
+        for (const field of ['resume']) {
             const file = req.files?.[field]?.[0];
             if (!file) continue;
             try {
@@ -135,22 +131,6 @@ router.post('/', uploadFields, async (req, res) => {
             updateData.resumeOriginalName = mainFile.originalname;
         }
 
-        // ── GenAI resume
-        const genaiFile = req.files?.resume_genai?.[0];
-        if (genaiFile) {
-            if (profile?.resumeGenaiPath && fs.existsSync(profile.resumeGenaiPath)) fs.unlinkSync(profile.resumeGenaiPath);
-            updateData.resumeGenaiPath = genaiFile.path;
-            updateData.resumeGenaiName = genaiFile.originalname;
-        }
-
-        // ── Backend resume
-        const backendFile = req.files?.resume_backend?.[0];
-        if (backendFile) {
-            if (profile?.resumeBackendPath && fs.existsSync(profile.resumeBackendPath)) fs.unlinkSync(profile.resumeBackendPath);
-            updateData.resumeBackendPath = backendFile.path;
-            updateData.resumeBackendName = backendFile.originalname;
-        }
-
         if (profile) { Object.assign(profile, updateData); await profile.save(); }
         else { profile = await UserProfile.create(updateData); }
 
@@ -165,9 +145,7 @@ router.post('/', uploadFields, async (req, res) => {
                 : null);
 
         const sources = {
-            resume_main:    resolveSrc(mainFile,    'resumePath',        'resumeOriginalName'),
-            resume_genai:   resolveSrc(genaiFile,   'resumeGenaiPath',   'resumeGenaiName'),
-            resume_backend: resolveSrc(backendFile, 'resumeBackendPath', 'resumeBackendName'),
+            resume_main: resolveSrc(mainFile, 'resumePath', 'resumeOriginalName'),
         };
 
         let optimizerSyncError = null;
@@ -209,15 +187,44 @@ router.post('/', uploadFields, async (req, res) => {
     }
 });
 
+/**
+ * Push a user's stored CV to the optimizer so its layout template is rebuilt.
+ *
+ * Used both on profile save and when the optimizer reports its stored template
+ * was produced by an older parser. Without the second case, a fix to the PDF
+ * reader would only reach people who happened to re-upload their CV — everyone
+ * else would keep getting CVs built from a stale, mis-parsed structure.
+ *
+ * Never throws: this is a background repair, not something to fail a request on.
+ */
+export async function syncResumeToOptimizer(profile) {
+    if (!profile?.resumePath || !fs.existsSync(profile.resumePath)) return false;
+    try {
+        const fd = new FormData();
+        fd.append('user_email', profile.email);
+        const src = { path: profile.resumePath, originalname: profile.resumeOriginalName };
+        fd.append('resume_main', fs.createReadStream(src.path), {
+            filename: forwardNameFor(src),
+            contentType: contentTypeFor(src),
+        });
+        await axios.post(`${RESUME_OPTIMIZER_URL}/api/save-defaults`, fd, {
+            headers: fd.getHeaders(), timeout: 30000,
+        });
+        console.log(`[Profile] CV template rebuilt for ${profile.email}`);
+        return true;
+    } catch (err) {
+        console.warn('[Profile] Could not rebuild the CV template:', err.response?.data?.detail || err.message);
+        return false;
+    }
+}
+
 // ── Resume slots ────────────────────────────────────────────────────────────
 
 // Slot name → the profile fields it owns. `variant` is the optimizer's own key
 // for the slot, which stays 'genai'/'backend' on the Python side even though
 // the UI now calls them Resume 1 and Resume 2.
 const RESUME_SLOTS = {
-    main:    { pathField: 'resumePath',        nameField: 'resumeOriginalName', variant: 'main' },
-    genai:   { pathField: 'resumeGenaiPath',   nameField: 'resumeGenaiName',    variant: 'genai' },
-    backend: { pathField: 'resumeBackendPath', nameField: 'resumeBackendName',  variant: 'backend' },
+    main: { pathField: 'resumePath', nameField: 'resumeOriginalName', variant: 'main' },
 };
 
 // DELETE /api/profile/resume/:slot — remove an uploaded resume so it can be replaced

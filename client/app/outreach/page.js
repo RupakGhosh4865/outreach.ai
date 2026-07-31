@@ -1003,21 +1003,20 @@ export default function OutreachPage() {
 
                             {fitResults && (
                                 <div className="mb-5 rounded-xl border border-white/8 bg-white/2 p-4">
+                                    {/* One CV per account, so one score — the
+                                        three-way comparison had nothing left to compare. */}
                                     <div className="mb-3 flex items-center justify-between gap-3">
                                         <p className="text-sm font-bold">ATS match</p>
-                                        <Badge tone="brand">Best: {fitResults.recommendedResume}</Badge>
-                                    </div>
-                                    <div className="grid grid-cols-3 gap-3">
-                                        {['main', 'genai', 'backend'].map((type) => {
-                                            const score = fitResults.scores?.[type] || 0;
-                                            const tone = score > 75 ? 'text-success' : score > 50 ? 'text-warning' : 'text-danger';
-                                            return (
-                                                <div key={type} className="text-center">
-                                                    <p className={cn('text-xl font-extrabold', tone)} data-numeric>{score}%</p>
-                                                    <p className="mt-0.5 text-[0.7rem] uppercase tracking-wide text-subtle">{type}</p>
-                                                </div>
-                                            );
-                                        })}
+                                        <span
+                                            className={cn(
+                                                'text-xl font-extrabold',
+                                                fitResults.score > 75 ? 'text-success'
+                                                    : fitResults.score > 50 ? 'text-warning' : 'text-danger',
+                                            )}
+                                            data-numeric
+                                        >
+                                            {fitResults.score ?? 0}%
+                                        </span>
                                     </div>
                                     {fitResults.advice?.length > 0 && (
                                         <ul className="mt-4 space-y-1.5 border-t border-white/8 pt-3">

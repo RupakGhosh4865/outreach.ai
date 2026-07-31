@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 import sqlite3
 from datetime import datetime
 
-from layout import derive_layout, editable_view, apply_rewrite, layout_to_text
+from layout import derive_layout, editable_view, apply_rewrite, layout_to_text, PARSER_VERSION
 
 load_dotenv()
 
@@ -809,7 +809,11 @@ async def get_template(user_email: str, variant: Optional[str] = None):
     layout, source = _load_template(user_email, variant)
     if not layout:
         raise HTTPException(status_code=404, detail="No resume template for this account.")
-    return {"layout": layout, "source": source}
+    # `stale` tells the caller this template predates the current parser, so a
+    # fix to the reader can be applied by re-sending the file rather than
+    # waiting for the user to happen to re-upload it.
+    stale = layout.get("parser_version") != PARSER_VERSION
+    return {"layout": layout, "source": source, "stale": stale, "parser_version": PARSER_VERSION}
 
 
 class TemplateUpdateRequest(BaseModel):
