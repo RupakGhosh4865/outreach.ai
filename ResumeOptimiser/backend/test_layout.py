@@ -188,6 +188,26 @@ def test_heading_style_falls_back_to_weight_then_case():
     assert _pick_heading_style(capped, 11, 20, 60.0) == {"size": 11, "bold": None, "upper": True}
 
 
+def test_inline_dates_are_split_off_an_entry_heading():
+    # Word CVs commonly put the whole entry on one line with no separate date
+    # column. Without splitting the trailing dates the row parses as a
+    # paragraph, and the job title loses its emphasis in the rendered CV.
+    from layout import _split_inline_dates
+
+    assert _split_inline_dates("Financial Analyst | Future Wings | Mumbai | 2021-2023") == (
+        "Financial Analyst | Future Wings | Mumbai", "2021-2023")
+    assert _split_inline_dates("Logistics Operations Assistant | DH Nationwide | 2025-Present") == (
+        "Logistics Operations Assistant | DH Nationwide", "2025-Present")
+    assert _split_inline_dates("MSc Finance | Coventry University | 2023 - 2025") == (
+        "MSc Finance | Coventry University", "2023 - 2025")
+
+    # No trailing range, so nothing to split.
+    assert _split_inline_dates("PROFESSIONAL EXPERIENCE") is None
+    assert _split_inline_dates("Financial Analyst | Future Wings") is None
+    # A bare date is not an entry heading — splitting would leave no title.
+    assert _split_inline_dates("2021-2023") is None
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
