@@ -29,7 +29,7 @@ const EMAIL_TYPES = [
     { value: 'vacancy_inquiry', icon: Search, label: 'Vacancy inquiry', desc: 'Ask if roles are open' },
 ];
 
-/** The eight stages the autopilot reports while it works. */
+/** The stages the autopilot reports while it works. */
 const AUTOPILOT_STAGES = [
     { icon: Search, title: 'Reading the job post', desc: 'Fetching the posting and its requirements.' },
     { icon: Bot, title: 'Analysing your profile', desc: 'Matching your stack against the role.' },
@@ -37,7 +37,6 @@ const AUTOPILOT_STAGES = [
     { icon: Users, title: 'Targeting people', desc: 'Identifying hiring managers and decision makers.' },
     { icon: FileText, title: 'Optimising your CV', desc: 'Rewriting and scoring it against this job description.' },
     { icon: Sparkles, title: 'Writing the emails', desc: 'Drafting personalised outreach copy.' },
-    { icon: Gauge, title: 'Selecting the best CV', desc: 'Picking the highest ATS match for this role.' },
     { icon: Check, title: 'Ready', desc: 'Everything is prepared for your review.' },
 ];
 
@@ -596,7 +595,6 @@ export default function OutreachPage() {
             setTimeout(() => setAutoStep(4), 4000),
             setTimeout(() => setAutoStep(5), 7000),
             setTimeout(() => setAutoStep(6), 11000),
-            setTimeout(() => setAutoStep(7), 16000),
         ];
         const clearStepTimers = () => stepTimers.forEach(clearTimeout);
 
@@ -609,7 +607,7 @@ export default function OutreachPage() {
             });
 
             clearStepTimers();
-            setAutoStep(8); // Ready
+            setAutoStep(AUTOPILOT_STAGES.length); // Ready
 
             // Capture optimized resume info if returned
             if (data.optimizedResumeUsed) {
@@ -776,17 +774,17 @@ export default function OutreachPage() {
                                 <div className="mt-6 rounded-2xl border border-white/8 bg-white/2 p-4 sm:p-5" aria-live="polite">
                                     <div className="mb-4 flex items-center justify-between gap-3">
                                         <p className="text-sm font-bold">
-                                            {autoStep >= 8 ? 'Ready for review' : 'Working on it…'}
+                                            {autoStep >= AUTOPILOT_STAGES.length ? 'Ready for review' : 'Working on it…'}
                                         </p>
                                         <span className="text-xs font-semibold text-subtle" data-numeric>
-                                            Step {Math.min(autoStep, 8)} of 8
+                                            Step {Math.min(autoStep, AUTOPILOT_STAGES.length)} of {AUTOPILOT_STAGES.length}
                                         </span>
                                     </div>
 
                                     <div className="mb-4 h-1.5 overflow-hidden rounded-full bg-white/8">
                                         <div
                                             className="h-full rounded-full bg-brand transition-[width] duration-500 ease-out"
-                                            style={{ width: `${(Math.min(autoStep, 8) / 8) * 100}%` }}
+                                            style={{ width: `${(Math.min(autoStep, AUTOPILOT_STAGES.length) / AUTOPILOT_STAGES.length) * 100}%` }}
                                         />
                                     </div>
 

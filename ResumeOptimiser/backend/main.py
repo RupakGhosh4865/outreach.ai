@@ -882,6 +882,17 @@ async def resume_tailor(req: ResumeTailorRequest):
             detail="No resume template found for this account. Upload a resume on your profile first.",
         )
 
+    # A template built by an older parser carries its misreadings into every CV
+    # made from it. Refuse rather than produce one, so the caller rebuilds the
+    # template from the stored file and tries again — the alternative is a
+    # silently wrong document the user only notices after sending it.
+    if layout.get("parser_version") != PARSER_VERSION:
+        raise HTTPException(
+            status_code=409,
+            detail="stale_template",
+            headers={"X-Parser-Version": str(PARSER_VERSION)},
+        )
+
     editable = editable_view(layout)
     user_message = f"""--- Resume blocks to rewrite ---
 {json.dumps(editable, ensure_ascii=False)}

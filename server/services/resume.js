@@ -197,11 +197,26 @@ async function buildCoverLetter({ jobDescription, layout, resumeText, pdfPath })
  */
 async function buildLayoutResume({ jobDescription, profile, outPath, onStage }) {
     onStage?.('analysing');
-    const { data } = await axios.post(
+
+    const tailor = () => axios.post(
         `${RESUME_OPTIMIZER_URL}/api/resume-tailor`,
         { job_description: jobDescription, user_email: profile?.email },
         { timeout: 180000 }
     );
+
+    let data;
+    try {
+        ({ data } = await tailor());
+    } catch (err) {
+        // The optimizer refuses to tailor from a template built by an older
+        // parser. Rebuild it from the CV already on disk and try once more —
+        // otherwise the parser's old misreadings ride into the finished CV.
+        if (err?.response?.status !== 409 || err.response.data?.detail !== 'stale_template') throw err;
+        console.log('[Resume] Template predates the current parser — rebuilding it.');
+        const { syncResumeToOptimizer } = await import('../routes/profile.js');
+        if (!await syncResumeToOptimizer(profile)) throw err;
+        ({ data } = await tailor());
+    }
 
     if (!data?.layout) throw new Error('Optimizer returned no layout.');
 
