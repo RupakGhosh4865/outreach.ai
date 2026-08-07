@@ -38,7 +38,7 @@ test('attachResume prefers the freshly optimized PDF', () => {
         assert.equal(result.attachments[0].path, optimized);
         // Recruiters see the filename before they open anything, so it names
         // the candidate and the application rather than "Resume_...".
-        assert.equal(result.attachments[0].filename, 'Nikita_Sah_Barclays_PLC_Backend_Engineer.pdf');
+        assert.equal(result.attachments[0].filename, 'Nikita_Sah_Backend_Engineer_Barclays_PLC.pdf');
         assert.equal(result.body, 'My resume is attached.', 'body is untouched when an attachment exists');
     } finally {
         fs.unlinkSync(optimized); fs.unlinkSync(profileResume);
@@ -58,8 +58,8 @@ test('attachResume names the cover letter to match the CV', () => {
             companyName: 'Mears',
         });
         assert.equal(attachments.length, 2);
-        assert.equal(attachments[0].filename, 'Nikita_Sah_Mears_Business_Analyst.pdf');
-        assert.equal(attachments[1].filename, 'Nikita_Sah_Mears_Business_Analyst_Cover_Letter.pdf');
+        assert.equal(attachments[0].filename, 'Nikita_Sah_Business_Analyst_Mears.pdf');
+        assert.equal(attachments[1].filename, 'Nikita_Sah_Business_Analyst_Mears_Cover_Letter.pdf');
     } finally {
         fs.unlinkSync(optimized); fs.unlinkSync(cover);
     }
@@ -139,15 +139,15 @@ test('documentFileName is built from the CV, not the account', async () => {
     // comes off the CV. All-caps headers are softened, but acronyms survive.
     assert.equal(
         documentFileName({ candidateName: 'NIKITA SAH', companyName: 'Amaris Consulting', jobTitle: 'Business Analyst' }),
-        'Nikita_Sah_Amaris_Consulting_Business_Analyst.pdf',
+        'Nikita_Sah_Business_Analyst_Amaris_Consulting.pdf',
     );
     assert.equal(
         documentFileName({ candidateName: 'Nikita Sah', companyName: 'KPMG', jobTitle: 'BA' }),
-        'Nikita_Sah_KPMG_BA.pdf',
+        'Nikita_Sah_BA_KPMG.pdf',
     );
     assert.equal(
         documentFileName({ candidateName: 'Nikita Sah', companyName: 'Amaris', jobTitle: 'BA', suffix: 'Cover Letter' }),
-        'Nikita_Sah_Amaris_BA_Cover_Letter.pdf',
+        'Nikita_Sah_BA_Amaris_Cover_Letter.pdf',
     );
     // Missing parts are dropped rather than leaving dangling separators.
     assert.equal(documentFileName({ jobTitle: 'Business Analyst' }), 'Business_Analyst.pdf');

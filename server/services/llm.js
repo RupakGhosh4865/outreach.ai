@@ -71,7 +71,27 @@ export const isRetryable = (err) => {
         || isConnectionError(err);
 };
 
-async function withRetry(fn, { attempts = 3, label = 'llm' } = {}) {
+/**
+ * Rewrite an SDK error into something that says what the user should do.
+ *
+ * "Request timed out." tells them nothing — it reads like the app is broken
+ * when the actual cause is the network between them and OpenAI, and it hides
+ * that the operation is worth simply retrying.
+ */
+function describeLlmError(err) {
+    if (isQuotaError(err)) {
+        return new Error('The OpenAI account is out of credit. Add billing at platform.openai.com to re-enable AI features.');
+    }
+    if (isConnectionError(err) || RETRYABLE_CODES.has(err?.code)) {
+        return new Error('Could not reach OpenAI — the connection timed out after several attempts. Check your internet and try again.');
+    }
+    return err;
+}
+
+// Five rather than three: a flaky connection often drops a couple of attempts
+// in a row, and this sits in front of user-visible generation where failing is
+// far more costly than waiting a few more seconds.
+async function withRetry(fn, { attempts = 5, label = 'llm' } = {}) {
     let lastErr;
     for (let i = 0; i < attempts; i++) {
         try {
@@ -84,11 +104,11 @@ async function withRetry(fn, { attempts = 3, label = 'llm' } = {}) {
             }
             if (!isRetryable(err) || i === attempts - 1) break;
             const backoff = Math.min(8000, 500 * 2 ** i) + Math.random() * 250;
-            console.warn(`[LLM:${label}] attempt ${i + 1} failed (${err.status || err.code || err.message}); retrying in ${Math.round(backoff)}ms`);
+            console.warn(`[LLM:${label}] attempt ${i + 1}/${attempts} failed (${err.name || err.status || err.code || err.message}); retrying in ${Math.round(backoff)}ms`);
             await sleep(backoff);
         }
     }
-    throw lastErr;
+    throw describeLlmError(lastErr);
 }
 
 /** Strip markdown fences some models still wrap JSON in. */

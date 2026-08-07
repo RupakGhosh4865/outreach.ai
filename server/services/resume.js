@@ -69,11 +69,13 @@ export async function parseResume(resumePath) {
 }
 
 /**
- * Filename for a generated document: `Name_Company_Role.pdf`.
+ * Filename for a generated document: `Name_Role_Company.pdf`.
  *
  * Applications are often filed by filename alone, so "Optimized_Resume.pdf" is
  * both anonymous to the recruiter and unmanageable for the candidate once a few
- * have been downloaded. Empty parts are dropped rather than leaving separators.
+ * have been downloaded. Role before company because a candidate's own folder
+ * sorts more usefully by the job they went for than by who they sent it to.
+ * Empty parts are dropped rather than leaving separators.
  */
 export function documentFileName({ candidateName, companyName, jobTitle, suffix = '', ext = 'pdf' }) {
     // CV headers are often set in capitals ("NIKITA SAH"), which would carry
@@ -90,7 +92,7 @@ export function documentFileName({ candidateName, companyName, jobTitle, suffix 
         .replace(/[\s-]+/g, '_')
         .slice(0, 60);
 
-    const parts = [candidateName, companyName, jobTitle, suffix].map(clean).filter(Boolean);
+    const parts = [candidateName, jobTitle, companyName, suffix].map(clean).filter(Boolean);
     return `${parts.length ? parts.join('_') : 'Resume'}.${ext}`;
 }
 
@@ -197,11 +199,26 @@ async function buildCoverLetter({ jobDescription, layout, resumeText, pdfPath })
  */
 async function buildLayoutResume({ jobDescription, profile, outPath, onStage }) {
     onStage?.('analysing');
-    const { data } = await axios.post(
+
+    const tailor = () => axios.post(
         `${RESUME_OPTIMIZER_URL}/api/resume-tailor`,
         { job_description: jobDescription, user_email: profile?.email },
         { timeout: 180000 }
     );
+
+    let data;
+    try {
+        ({ data } = await tailor());
+    } catch (err) {
+        // The optimizer refuses to tailor from a template built by an older
+        // parser. Rebuild it from the CV already on disk and try once more —
+        // otherwise the parser's old misreadings ride into the finished CV.
+        if (err?.response?.status !== 409 || err.response.data?.detail !== 'stale_template') throw err;
+        console.log('[Resume] Template predates the current parser — rebuilding it.');
+        const { syncResumeToOptimizer } = await import('../routes/profile.js');
+        if (!await syncResumeToOptimizer(profile)) throw err;
+        ({ data } = await tailor());
+    }
 
     if (!data?.layout) throw new Error('Optimizer returned no layout.');
 
