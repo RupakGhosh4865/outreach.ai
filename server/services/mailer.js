@@ -128,14 +128,66 @@ export function attachResume({ optimizedPdfPath, coverPdfPath, profile, body, jo
     return { attachments: [], body: stripAttachmentClaim(body), attachmentStatus: 'missing' };
 }
 
+/**
+ * Copy a sent message into the mailbox's Sent folder over IMAP.
+ *
+ * SMTP only hands a message to the server for delivery — it does not file a
+ * copy. Gmail's web client does that itself, so mail sent through this app was
+ * arriving with recipients but never showing in the user's Sent list, which
+ * looks exactly like it was never sent.
+ *
+ * Never throws: the message has already gone out, and failing to file a copy
+ * must not be reported as a failed send.
+ */
+async function copyToSentFolder(raw) {
+    const user = process.env.GMAIL_USER;
+    const pass = process.env.GMAIL_APP_PASSWORD;
+    if (!user || !pass || !raw) return false;
+
+    const { ImapFlow } = await import('imapflow');
+    const client = new ImapFlow({
+        host: 'imap.gmail.com',
+        port: 993,
+        secure: true,
+        auth: { user, pass },
+        logger: false,
+        connectionTimeout: 20000,
+        greetingTimeout: 20000,
+    });
+    client.on('error', () => { /* handled by the catch below */ });
+
+    try {
+        await client.connect();
+        // Gmail localises the folder name, so ask for the one flagged \Sent
+        // rather than guessing at "Sent" or "[Gmail]/Sent Mail".
+        const boxes = await client.list();
+        const sent = boxes.find((b) => b.specialUse === '\\Sent')
+            || boxes.find((b) => /sent/i.test(b.path));
+        if (!sent) return false;
+
+        await client.append(sent.path, raw, ['\\Seen']);
+        return true;
+    } catch (err) {
+        console.warn('[Mailer] Could not file a copy in Sent:', err.message);
+        return false;
+    } finally {
+        await client.logout().catch(() => { /* already closed */ });
+    }
+}
+
 /** Send one email per recipient, collecting successes and failures. */
 export async function sendToRecipients({ transporter, from, recipients, subject, body, attachments }) {
     const sentTo = [];
     const errors = [];
 
+    // Builds the MIME without sending, so the exact bytes that go out are the
+    // bytes filed in Sent. The SMTP transport does not hand back the raw
+    // message, so composing it here is the only way to have both.
+    const composer = nodemailer.createTransport({ streamTransport: true, buffer: true });
+
     for (const recipient of recipients) {
         try {
-            await transporter.sendMail({
+            const built = await composer.sendMail({
                 from,
                 to: recipient.email,
                 subject,
@@ -143,12 +195,17 @@ export async function sendToRecipients({ transporter, from, recipients, subject,
                 html: bodyToHtml(body),
                 attachments,
             });
+
+            await transporter.sendMail({ envelope: built.envelope, raw: built.message });
             sentTo.push(recipient.email);
+
+            await copyToSentFolder(built.message);
         } catch (err) {
             console.error(`[Mailer] Failed to send to ${recipient.email}:`, err.message);
             errors.push({ email: recipient.email, error: err.message });
         }
     }
 
+    if (sentTo.length) console.log(`[Mailer] Sent ${sentTo.length} email(s) as ${process.env.GMAIL_USER}`);
     return { sentTo, errors };
 }

@@ -141,8 +141,20 @@ def _rows(lines: list[dict], page_width: float) -> list[dict]:
                 label = body[0]["text"].strip()
                 body = body[1:]
 
+        text = " ".join(r["text"] for r in body).strip()
+
+        # Many CVs put the whole entry on one line — "Financial Analyst | Future
+        # Wings | Mumbai | 2021–2023" — with no separately-positioned date
+        # column. Split the trailing date off so the row is still recognised as
+        # an entry; otherwise it parses as a paragraph and the role title loses
+        # its emphasis in the rendered CV.
+        if not right and not label and row_is_bold(lead):
+            split = _split_inline_dates(text)
+            if split:
+                text, right = split
+
         row.update({
-            "text": " ".join(r["text"] for r in body).strip(),
+            "text": text,
             "right": right,
             "label": label,
             "size": lead["size"],
@@ -151,6 +163,36 @@ def _rows(lines: list[dict], page_width: float) -> list[dict]:
             "x0": lead["x0"],
         })
     return [r for r in rows if r["text"] or r["right"]]
+
+
+# A trailing date range on a one-line entry: "… | Mumbai | 2021–2023", "… 2025–Present".
+INLINE_DATES_RE = re.compile(
+    rf"\s*[|–—\-,]?\s*("
+    rf"(?:{MONTHS}\s*)?\d{{4}}\s*[–—-]+\s*(?:(?:{MONTHS}\s*)?\d{{4}}|Present|Current|Ongoing)"
+    rf"|(?:{MONTHS}\s*)?\d{{4}}\s*[–—-]+\s*(?:{MONTHS}\s+)?\d{{4}}"
+    rf")\s*$",
+    re.IGNORECASE,
+)
+
+
+def row_is_bold(lead: dict) -> bool:
+    return bool(lead.get("bold"))
+
+
+def _split_inline_dates(text: str) -> Optional[tuple]:
+    """
+    Split "Role | Employer | Location | 2021–2023" into its text and its dates.
+
+    Returns None when there is no trailing date range, or when removing it
+    would leave nothing — a bare date line is not an entry heading.
+    """
+    match = INLINE_DATES_RE.search(text)
+    if not match:
+        return None
+    left = text[: match.start()].strip(" |–—-,")
+    if not left:
+        return None
+    return left, match.group(1).strip()
 
 
 def _heading_shaped(row: dict, left_margin: float) -> bool:
@@ -423,10 +465,15 @@ def derive_layout(pdf_bytes: bytes) -> dict[str, Any]:
             if unmarked:
                 # Markerless list: only the line spacing can tell a wrapped line
                 # from the next item, since both sit at the same indent.
+                # The margin between a wrapped line and the next item can be
+                # under a point — 15.0 vs 15.8 in a Word CV — so a percentage
+                # threshold swallows whole lists. An absolute half-point step
+                # separates them, with a proportional floor for large type.
+                step = max(leading + 0.5, leading * 1.03)
                 continuation = bool(
                     prev_row and leading > 0
                     and row["page"] == prev_row["page"]
-                    and (row["y"] - prev_row["y"]) <= leading * 1.10
+                    and (row["y"] - prev_row["y"]) <= step
                 )
             else:
                 indented = bullet_indent is not None and row["x0"] > bullet_indent

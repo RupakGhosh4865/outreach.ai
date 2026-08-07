@@ -524,7 +524,11 @@ Use an empty string for anything the text does not contain.`,
 
         if (job.jobDescription) {
             console.log('[Autopilot] Starting resume optimization...');
-            const optimResult = await getOptimizedResumeForJob(job.jobDescription, profile);
+            // Company and role travel with it so the generated files are named
+            // after the application rather than the candidate alone.
+            const optimResult = await getOptimizedResumeForJob(job.jobDescription, profile, {
+                companyName: job.companyName, jobTitle: job.jobTitle,
+            });
             if (optimResult.ok) {
                 resumeText = optimResult.resumeText;
                 optimizedResumeUsed = optimResult.source;
@@ -669,7 +673,7 @@ router.post('/send', async (req, res) => {
 
         if (jobDescription) {
             console.log('[Send] Optimizing resume for job...');
-            const optimResult = await getOptimizedResumeForJob(jobDescription, profile);
+            const optimResult = await getOptimizedResumeForJob(jobDescription, profile, { companyName, jobTitle });
             if (optimResult.ok) {
                 optimizedPdfPath = optimResult.pdfPath;
                 candidateName = optimResult.candidateName;
